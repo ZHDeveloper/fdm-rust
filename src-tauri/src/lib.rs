@@ -319,8 +319,9 @@ impl DesktopHooks for TauriHooks {
         tauri::async_runtime::spawn(async move {
             let result: Result<()> = async {
                 let updater = build_updater(&app, &settings.get())?;
-                let Some(update) = updater.check().await? else {
-                    bail!("没有可用更新");
+                let mut update = match updater.check().await? {
+                    Some(update) => update,
+                    None => bail!("没有可用更新"),
                 };
                 if update.version != expected_version {
                     bail!(
@@ -330,62 +331,86 @@ impl DesktopHooks for TauriHooks {
                     );
                 }
 
-                let mut status = UpdateStatus::default();
-                status.phase = "downloading".to_string();
-                status.current_version = app_version(&app);
-                status.version = Some(update.version.clone());
-                status.notes = update.body.clone();
-                publish_update_status(&manager, &status_slot, status);
-
-                let mut downloaded = 0u64;
-                let mut last_emit = Instant::now() - Duration::from_secs(1);
-                let manager_for_progress = manager.clone();
-                let status_for_progress = status_slot.clone();
-                let app_for_progress = app.clone();
-                let app_for_install = app.clone();
                 let update_version = update.version.clone();
                 let update_notes = update.body.clone();
-                let version_for_progress = update_version.clone();
-                let notes_for_progress = update_notes.clone();
-                let version_for_install = update_version.clone();
-                let notes_for_install = update_notes.clone();
-                update
-                    .download_and_install(
-                        move |chunk, total| {
-                            downloaded += chunk as u64;
-                            if last_emit.elapsed() < Duration::from_millis(250) {
-                                return;
-                            }
-                            last_emit = Instant::now();
-                            let mut progress = UpdateStatus::default();
-                            progress.phase = "downloading".to_string();
-                            progress.current_version = app_version(&app_for_progress);
-                            progress.version = Some(version_for_progress.clone());
-                            progress.notes = notes_for_progress.clone();
-                            progress.downloaded = downloaded;
-                            progress.total = total;
-                            publish_update_status(
-                                &manager_for_progress,
-                                &status_for_progress,
-                                progress,
-                            );
-                        },
-                        {
-                            let manager = manager.clone();
-                            let status_slot = status_slot.clone();
-                            let version = version_for_install.clone();
-                            let notes = notes_for_install.clone();
-                            move || {
-                                let mut status = UpdateStatus::default();
-                                status.phase = "installing".to_string();
-                                status.current_version = app_version(&app_for_install);
-                                status.version = Some(version);
-                                status.notes = notes;
-                                publish_update_status(&manager, &status_slot, status);
-                            }
-                        },
-                    )
-                    .await?;
+                let candidates =
+                    github_proxy_candidates(update.download_url.as_str(), &settings.get(), false);
+                let mut last_error: Option<String> = None;
+                let mut installed = false;
+                for candidate in candidates {
+                    let Ok(url) = Url::parse(&candidate) else {
+                        continue;
+                    };
+                    update.download_url = url;
+
+                    let mut status = UpdateStatus::default();
+                    status.phase = "downloading".to_string();
+                    status.current_version = app_version(&app);
+                    status.version = Some(update_version.clone());
+                    status.notes = update_notes.clone();
+                    publish_update_status(&manager, &status_slot, status);
+
+                    let mut downloaded = 0u64;
+                    let mut last_emit = Instant::now() - Duration::from_secs(1);
+                    let manager_for_progress = manager.clone();
+                    let status_for_progress = status_slot.clone();
+                    let app_for_progress = app.clone();
+                    let app_for_install = app.clone();
+                    let version_for_progress = update_version.clone();
+                    let notes_for_progress = update_notes.clone();
+                    let version_for_install = update_version.clone();
+                    let notes_for_install = update_notes.clone();
+                    match update
+                        .download_and_install(
+                            move |chunk, total| {
+                                downloaded += chunk as u64;
+                                if last_emit.elapsed() < Duration::from_millis(250) {
+                                    return;
+                                }
+                                last_emit = Instant::now();
+                                let mut progress = UpdateStatus::default();
+                                progress.phase = "downloading".to_string();
+                                progress.current_version = app_version(&app_for_progress);
+                                progress.version = Some(version_for_progress.clone());
+                                progress.notes = notes_for_progress.clone();
+                                progress.downloaded = downloaded;
+                                progress.total = total;
+                                publish_update_status(
+                                    &manager_for_progress,
+                                    &status_for_progress,
+                                    progress,
+                                );
+                            },
+                            {
+                                let manager = manager.clone();
+                                let status_slot = status_slot.clone();
+                                let version = version_for_install.clone();
+                                let notes = notes_for_install.clone();
+                                move || {
+                                    let mut status = UpdateStatus::default();
+                                    status.phase = "installing".to_string();
+                                    status.current_version = app_version(&app_for_install);
+                                    status.version = Some(version);
+                                    status.notes = notes;
+                                    publish_update_status(&manager, &status_slot, status);
+                                }
+                            },
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            installed = true;
+                            break;
+                        }
+                        Err(err) => last_error = Some(err.to_string()),
+                    }
+                }
+                if !installed {
+                    bail!(
+                        "更新包下载失败：{}",
+                        last_error.unwrap_or_else(|| "没有可用下载线路".to_string())
+                    );
+                }
 
                 let mut status = UpdateStatus::default();
                 status.phase = "installing".to_string();

@@ -30,7 +30,7 @@ pub fn normalize_prefix(raw: &str) -> Option<String> {
     Some(value)
 }
 
-/// 只对 GitHub 的发布下载和 raw 文件启用加速；其他域名保持直连。
+/// 只对 GitHub 的发布资产和 raw 文件启用加速；其他域名保持直连。
 pub fn is_eligible_github_url(raw: &str) -> bool {
     let Ok(parsed) = Url::parse(raw.trim()) else {
         return false;
@@ -43,7 +43,10 @@ pub fn is_eligible_github_url(raw: &str) -> bool {
             .host_str()
             .map(|host| host.to_ascii_lowercase())
             .as_deref(),
-        Some("github.com") | Some("www.github.com") | Some("raw.githubusercontent.com")
+        Some("github.com")
+            | Some("www.github.com")
+            | Some("raw.githubusercontent.com")
+            | Some("api.github.com")
     )
 }
 
@@ -191,6 +194,15 @@ mod tests {
             github_proxy_candidates(signed, &settings, false),
             vec![signed]
         );
+    }
+
+    #[test]
+    fn github_api_asset_url_is_proxied() {
+        let settings = enabled_settings();
+        let url = "https://api.github.com/repos/a/b/releases/assets/1";
+        let out = github_proxy_candidates(url, &settings, false);
+        assert_eq!(out[0], format!("{}{}", GITHUB_PROXY_PRESETS[0], url));
+        assert_eq!(out.last().map(String::as_str), Some(url));
     }
 
     #[test]
