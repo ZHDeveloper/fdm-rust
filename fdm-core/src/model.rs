@@ -5,10 +5,9 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::error::{absolute_path, path_to_string, Result};
+use crate::error::{absolute_path, path_to_string};
 use crate::paths;
 
-pub const CHUNK_SIZE: usize = 64 * 1024;
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 pub const STATUS_QUEUED: &str = "queued";
@@ -26,10 +25,6 @@ pub fn is_active_status(status: &str) -> bool {
         status,
         STATUS_CONNECTING | STATUS_WAITING | STATUS_DOWNLOADING | STATUS_MERGING
     )
-}
-
-pub fn is_terminal_status(status: &str) -> bool {
-    matches!(status, STATUS_DONE | STATUS_PAUSED | STATUS_ERROR)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,9 +60,6 @@ impl Segment {
         (self.cur - self.start).min(self.end.saturating_sub(self.start) + 1)
     }
 
-    pub fn total(&self) -> u64 {
-        self.end.saturating_sub(self.start) + 1
-    }
     pub fn complete(&self) -> bool {
         self.done || self.cur > self.end
     }
@@ -764,22 +756,6 @@ pub fn numbered_filename(filename: &str, number: u32) -> String {
         .map(|s| format!(".{}", s.to_string_lossy()))
         .unwrap_or_default();
     format!("{stem} ({number}){ext}")
-}
-
-pub fn task_cfg_path(filepath: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.fdmcfg", filepath.to_string_lossy()))
-}
-
-pub fn existing_parent(path: &Path) -> Option<PathBuf> {
-    if path.is_dir() {
-        Some(path.to_path_buf())
-    } else {
-        path.parent().filter(|p| p.exists()).map(Path::to_path_buf)
-    }
-}
-
-pub fn ensure_task_dir(data: &TaskData) -> Result<()> {
-    paths::ensure_dir(&data.dir)
 }
 
 #[cfg(test)]

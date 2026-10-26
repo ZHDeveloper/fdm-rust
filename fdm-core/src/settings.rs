@@ -202,10 +202,6 @@ impl SettingsStore {
         Ok(store)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn get(&self) -> Settings {
         self.settings.read().map(|s| s.clone()).unwrap_or_default()
     }

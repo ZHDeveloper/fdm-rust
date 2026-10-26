@@ -382,20 +382,6 @@ impl BtEngine {
         result.is_ok()
     }
 
-    pub async fn has_torrent(&self, info_hash: &str) -> bool {
-        let info_hash = info_hash.to_ascii_lowercase();
-        let found = std::cell::Cell::new(false);
-        self.session.with_torrents(|iter| {
-            for (_, handle) in iter {
-                if handle.info_hash().as_string() == info_hash {
-                    found.set(true);
-                    break;
-                }
-            }
-        });
-        found.get()
-    }
-
     /// 重启后把已持久化的 torrent 重新挂到任务 id 上。
     pub async fn reattach(&self, id: i64, info_hash: &str) -> bool {
         let info_hash = info_hash.to_ascii_lowercase();

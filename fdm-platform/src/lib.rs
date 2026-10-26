@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use fdm_core::paths;
-
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
 
@@ -293,10 +291,6 @@ fn show_message_box(title: &str, message: &str, kind: &str, confirm: bool) -> bo
     let _ = watcher.join();
     matches!(result, IDOK | IDYES)
 }
-pub fn default_extension_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("extension")
-}
-
 #[cfg(windows)]
 fn join_key(base: &str, sub: &str) -> String {
     if base.is_empty() {
@@ -715,10 +709,6 @@ fn sync_auto_launch_impl(enabled: bool) -> bool {
         return false;
     };
     std::fs::write(path, format!("[Desktop Entry]\nType=Application\nName=FDM\nExec=\"{}\" --background\nX-GNOME-Autostart-enabled=true\n", exe.display())).is_ok()
-}
-
-pub fn extension_dir_ensure(path: &Path) -> bool {
-    paths::ensure_dir(path).is_ok()
 }
 
 fn browser_target(browser: &str) -> (&'static str, &'static str, &'static str) {

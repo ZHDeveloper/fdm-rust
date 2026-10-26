@@ -197,18 +197,6 @@ impl TaskManager {
         Self::build(data_dir, settings, None, None)
     }
 
-    /// 初始化 BT/ED2K 引擎；引擎失败时降级为仅 HTTP。
-    /// 应用启动路径应使用 `new` 先创建管理器，再异步调用 `init_engines`。
-    pub async fn with_engines(
-        data_dir: Option<PathBuf>,
-        settings: Arc<SettingsStore>,
-        paths: EnginePaths,
-    ) -> Result<Arc<Self>> {
-        let manager = Self::new(data_dir, settings)?;
-        manager.init_engines(paths).await;
-        Ok(manager)
-    }
-
     /// 返回当前已就绪的 BT 引擎副本；初始化完成前为 None。
     pub fn bt_engine(&self) -> Option<Arc<BtEngine>> {
         self.bt.lock().ok().and_then(|engine| engine.clone())

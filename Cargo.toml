@@ -22,7 +22,6 @@ axum = "0.8"
 futures-util = "0.3"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "charset", "gzip", "brotli", "deflate", "socks", "json"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

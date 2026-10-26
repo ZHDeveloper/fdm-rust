@@ -32,13 +32,6 @@ impl TaskEntry {
         }
     }
 
-    pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel
-            .lock()
-            .map(|t| t.clone())
-            .unwrap_or_else(|_| CancellationToken::new())
-    }
-
     pub fn reset_cancel_token(&self) -> CancellationToken {
         let token = CancellationToken::new();
         if let Ok(mut guard) = self.cancel.lock() {

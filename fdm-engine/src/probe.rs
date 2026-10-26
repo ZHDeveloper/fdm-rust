@@ -100,15 +100,6 @@ pub fn headers_map(custom: &HashMap<String, String>) -> HeaderMap {
     map
 }
 
-pub async fn probe(
-    client: &Client,
-    url: &str,
-    custom: &HashMap<String, String>,
-    existing_filename: &str,
-) -> anyhow::Result<ProbeResult> {
-    probe_inner(client, url, custom, existing_filename, false).await
-}
-
 async fn probe_inner(
     client: &Client,
     url: &str,
