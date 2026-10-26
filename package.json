@@ -1,0 +1,19 @@
+{
+  "name": "fdm-rust",
+  "private": true,
+  "version": "1.0.7",
+  "description": "FDM desktop downloader built with Rust and Tauri 2",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "version:next": "node scripts/version.mjs next",
+    "version:bump": "node scripts/version.mjs bump",
+    "version:set": "node scripts/version.mjs set",
+    "version:check": "node scripts/version.mjs check",
+    "package:amule": "node scripts/package-amule.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>重复的下载链接</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: "Segoe UI","Microsoft YaHei",Tahoma,sans-serif; font-size: 11px; color: #1a1a1a;
+    background: #f0f0f0; user-select: none; display: flex; flex-direction: column; overflow: hidden; }
+  .body { flex: 1; min-height: 0; padding: 8px 14px 4px; overflow: auto; }
+  .summary { color: #1a1a1a; font-weight: 600; line-height: 1.5; margin-bottom: 6px; word-break: break-all; }
+  label.opt { display: flex; gap: 8px; align-items: center; line-height: 1.5; cursor: pointer; }
+  label.opt input { margin: 0; accent-color: #0078d7; flex: 0 0 auto; position: relative; top: 1px; }
+  label.opt span { min-width: 0; }
+  label.opt.remember { margin-top: 6px; color: #444; }
+  .foot { flex: 0 0 auto; padding: 7px 14px; border-top: 0.5px solid rgba(0,0,0,.12);
+    display: flex; justify-content: flex-end; gap: 8px; }
+  button { min-width: 76px; min-height: 24px; padding: 3px 12px; border: 0.5px solid rgba(0,0,0,.2);
+    border-radius: 5px; background: #fff; font: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: #e5f1fb; border-color: #0078d7; }
+  button:disabled { color: #999; }
+  .msg { margin-top: 8px; color: #b00020; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="body">
+    <div class="summary" id="summary">正在加载…</div>
+    <div class="options" id="options"></div>
+    <label class="opt remember"><input type="checkbox" id="remember"><span>记住我的选择，之后按同样方式处理</span></label>
+    <div class="msg" id="msg"></div>
+  </div>
+  <div class="foot">
+    <button id="cancel">取消</button>
+    <button class="pri" id="ok" disabled>确定</button>
+  </div>
+  <script src="fdm-bridge.js"></script>
+  <script src="duplicate.js?v=20261022-dup1"></script>
+</body>
+</html>

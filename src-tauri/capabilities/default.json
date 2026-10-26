@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "FDM main window capability",
+  "windows": [
+    "*"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

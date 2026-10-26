@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "fdm-core",
+    "fdm-engine",
+    "fdm-server",
+    "fdm-platform",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "1.0.7"
+edition = "2021"
+license = "MIT"
+authors = ["FDM Contributors"]
+rust-version = "1.90"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+futures-util = "0.3"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "charset", "gzip", "brotli", "deflate", "socks", "json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"

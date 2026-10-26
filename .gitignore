@@ -1,0 +1,56 @@
+# Rust / Cargo 构建产物
+/target/
+**/*.rs.bk
+*.pdb
+
+# Tauri 生成文件
+/src-tauri/gen/
+
+# Node / 前端依赖与产物
+node_modules/
+dist/
+npm-debug.log*
+
+# 本地运行数据、临时下载与测试产物
+*.log
+*.fdmpart
+*.fdmcfg
+test-downloads/
+release-test-data/
+
+# AI 品牌设计生成草稿（体积大，不入库）
+app_ui/branding/dreamina/
+
+# 临时截图
+screenshot-*.png
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~
+
+# 临时与备份文件
+*.bak
+*.bak*
+*.prev
+*.prev*
+*.old
+*.orig
+*.tmp
+_tmp_*
+
+# 操作系统生成文件
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# REA 逆向分析临时产物
+/rea/
+
+# 打包时由 scripts/package-amule.ps1 生成
+/src-tauri/resources/amule/

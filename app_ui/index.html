@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>FDM · 极速多线程下载器</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="stylesheet" href="style.css?v=2026102301">
+</head>
+<body>
+<!-- Menu bar -->
+  <div class="menubar">
+    <span class="menu" data-menu="task" data-i18n="menu_task">任务(T)</span><span class="menu" data-menu="file" data-i18n="menu_file">文件(F)</span>
+    <span class="menu" data-menu="download" data-i18n="menu_download">下载(D)</span><span class="menu" data-menu="view" data-i18n="menu_view">查看(V)</span>
+  </div>
+  <div id="dropdown" class="dropdown" style="display:none"></div>
+  <div id="ctxMenu" class="dropdown ctx" style="display:none"></div>
+
+<!-- Toolbar with big IDM-style buttons -->
+  <div class="toolbar">
+    <button id="btnAdd" class="tbtn"><div class="ic ic-add"></div><span data-i18n="tb_add">新建任务</span></button>
+    <button id="btnResume" class="tbtn"><div class="ic ic-resume"></div><span data-i18n="tb_resume">恢复</span></button>
+    <button id="btnPause" class="tbtn"><div class="ic ic-pause"></div><span data-i18n="tb_pause">暂停</span></button>
+    <button id="btnPauseAll" class="tbtn"><div class="ic ic-stopall"></div><span data-i18n="tb_pauseAll">全部暂停</span></button>
+    <button id="btnDelete" class="tbtn"><div class="ic ic-del"></div><span data-i18n="tb_delete">删除</span></button>
+    <button id="btnDeleteAll" class="tbtn"><div class="ic ic-delall"></div><span data-i18n="tb_deleteAll">删除全部</span></button>
+    <button id="btnFolder" class="tbtn"><div class="ic ic-folder"></div><span data-i18n="tb_openFolder">打开文件夹</span></button>
+    <button id="btnOptions" class="tbtn" title="设置"><div class="ic ic-options"></div><span>选项</span></button>
+  </div>
+
+
+  <div class="main">
+    <!-- Category sidebar -->
+    <div class="sidebar">
+      <div class="side-title" data-i18n="side_status">状态</div>
+      <div class="cat active" data-cat="all"><span class="cat-ic cat-all"></span><span data-i18n="cat_all">全部</span></div>
+      <div class="cat" data-cat="downloading"><span class="cat-ic cat-downloading"></span><span data-i18n="cat_downloading">下载中</span></div>
+      <div class="cat" data-cat="done"><span class="cat-ic cat-done"></span><span data-i18n="cat_completed">已完成</span></div>
+      <div class="cat-group" data-i18n="side_type">类型</div>
+      <div class="cat" data-cat="archive"><span class="cat-ic type-archive"></span><span data-i18n="cat_archive">压缩包</span></div>
+      <div class="cat" data-cat="video"><span class="cat-ic type-video"></span><span data-i18n="cat_video">视频</span></div>
+      <div class="cat" data-cat="music"><span class="cat-ic type-music"></span><span data-i18n="cat_audio">音乐</span></div>
+      <div class="cat" data-cat="program"><span class="cat-ic type-program"></span><span data-i18n="cat_program">程序</span></div>
+      <div class="cat" data-cat="document"><span class="cat-ic type-document"></span><span data-i18n="cat_document">文档</span></div>
+      <div class="cat" data-cat="other"><span class="cat-ic type-other"></span><span data-i18n="cat_other">其他</span></div>
+    </div>
+
+    <!-- Content pane -->
+    <div class="content-pane">
+      <!-- Task table -->
+      <div class="content">
+        <table class="tasks">
+        <thead>
+          <tr>
+            <th style="width:187px;min-width:100px" data-col="name">名称</th>
+            <th style="width:76px" data-col="size">大小</th>
+            <th style="width:88px;white-space:nowrap" data-col="status">状态</th>
+            <th style="width:150px;min-width:140px;white-space:nowrap" data-col="progress">进度</th>
+            <th style="width:82px" data-col="speed">速度</th>
+            <th style="width:82px;white-space:nowrap" data-col="eta">剩余时间</th>
+          </tr>
+        </thead>
+        <tbody id="taskBody"></tbody>
+      </table>
+      <div id="emptyHint" class="empty-hint">还没有下载任务。点击"新建任务"添加下载链接。</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="statTotal">0 个任务</span>
+    <span id="statSpeed">总速度: 0 B/s</span>
+  </div>
+
+  <!-- Add URL dialog -->
+  <div id="addModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-title">添加下载任务 <span id="kindBadge" class="kind-badge" style="display:none"></span></div>
+      <label>地址 URL</label>
+      <input id="inUrl" type="text" placeholder="https://...">
+      <label>保存到</label>
+      <div class="row">
+        <input id="inDir" type="text" readonly>
+        <button id="btnBrowse" class="sbtn">浏览...</button>
+      </div>
+      <label>文件名</label>
+      <input id="inName" type="text" placeholder="自动">
+      <div class="row two">
+        <div><label>连接数</label><input id="inConn" type="number" value="8" min="1" max="32"></div>
+        <div><label>限速 (KB/s，0不限)</label><input id="inRate" type="number" value="0" min="0"></div>
+      </div>
+      <label>自定义请求头（可选，每行一个，如 <code>Authorization: Bearer YOUR_TOKEN</code>）</label>
+      <textarea id="inHeaders" rows="2" placeholder="Authorization: Bearer YOUR_TOKEN&#10;Referer: https://..."></textarea>
+      <div class="modal-actions">
+        <button id="btnStart" class="sbtn">开始下载</button>
+        <button id="btnCancel" class="sbtn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="fdm-bridge.js"></script>
+  <script src="renderer.js?v=2026102405"></script>
+</body>
+</html>
+

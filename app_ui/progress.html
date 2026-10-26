@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>FDM · 下载进度</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: "Segoe UI","Microsoft YaHei",Tahoma,sans-serif; font-size: 11px; color: #1a1a1a;
+    background: #f0f0f0; user-select: none; display: flex; flex-direction: column; overflow: hidden; }
+
+  .panel { flex: 1; min-height: 0; overflow-y: hidden; padding: 20px 10px 8px; background: #f0f0f0;
+    scrollbar-width: thin; scrollbar-color: rgba(0,0,0,0.18) #f0f0f0; }
+  .panel::-webkit-scrollbar { width: 15px; }
+  .panel::-webkit-scrollbar-track { background: #f0f0f0; }
+  .panel::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border: 3px solid #f0f0f0; }
+  .panel::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.28); }
+
+  /* 隐藏细节时面板不滚动（高度按内容适配）；显示细节时才允许滚动 */
+  body:not(.details-hidden) .panel { overflow-y: auto; }
+
+  /* 分组框：仿 Win32 GroupBox */
+  .section { position: relative; background: #f0f0f0; border: 0.5px solid rgba(0,0,0,0.12); border-radius: 6px;
+    padding: 13px 10px 9px; margin: 0 0 22px; }
+  .section:last-child { margin-bottom: 0; }
+  .section > h2 { position: absolute; top: -8px; left: 9px; padding: 0 5px; background: #f0f0f0;
+    font-size: 11px; font-weight: 400; color: #1a1a1a; margin: 0; line-height: 1; }
+
+  .urlline { color: #0066cc; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 8px; }
+  .info { display: grid; grid-template-columns: 90px 1fr; gap: 5px 8px; }
+  .info .k { color: #1a1a1a; line-height: 17px; }
+  .info .v { color: #1a1a1a; line-height: 17px; min-width: 0; word-break: break-all; }
+  .info .status { color: #0066cc; }
+  .info .err { color: #c62828; }
+
+  /* 总体进度条（保留 IDM 绿色语义，改为扁平原生观感） */
+  .overall { height: 22px; border: 0.5px solid rgba(0,0,0,0.28); border-radius: 3px; overflow: hidden;
+    background: #fff; position: relative; }
+  .overall > i { display: block; height: 100%; width: 0; min-width: 0; background: #3fa14a; transition: width .3s; }
+  .overall > b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-style: normal; font-size: 11px; color: #1a1a1a; font-weight: 400; }
+
+  .blocklabel { color: #555; margin: 8px 0 4px; }
+  #blocks { width: 100%; height: 22px; border: 0.5px solid rgba(0,0,0,0.28); border-radius: 2px;
+    background: #fff; display: block; }
+
+  /* 线程明细表 */
+  /* 高度恰好容纳表头 + 8 行：<=8 行时容器自适应不滚动，超过 8 行才出现纵向滚动 */
+  .threads { border: 0.5px solid rgba(0,0,0,0.12); border-radius: 4px; overflow-y: auto; overflow-x: hidden; max-height: 220px; background: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  thead th { position: sticky; top: 0; z-index: 1; background: #f0f0f0; border-bottom: 0.5px solid rgba(0,0,0,0.16);
+    text-align: left; padding: 0 7px; height: 24px; line-height: 24px; color: #1a1a1a; font-weight: 400;
+    box-sizing: border-box; }
+  tbody td { padding: 0 7px; height: 24px; line-height: 24px; border-bottom: 0.5px solid #ececec;
+    white-space: nowrap; box-sizing: border-box; }
+  tbody tr:nth-child(even) { background: #fafafa; }
+  .col-n { width: 44px; text-align: center; }
+  .col-dl { width: 130px; }
+
+  .details-hidden .sec-threads { display: none; }
+
+  .foot { flex: 0 0 auto; padding: 8px 10px; background: #f0f0f0;
+    border-top: 0.5px solid rgba(0,0,0,0.12); display: flex; align-items: center; gap: 8px; }
+  .foot .spacer { flex: 1; }
+
+  .btn { padding: 3px 12px; border: 0.5px solid rgba(0,0,0,0.20); border-radius: 5px; background: #fff;
+    color: #1a1a1a; cursor: pointer; font-size: 11px; font-family: inherit; min-height: 24px; }
+  .btn:hover:not(:disabled) { background: #e5f1fb; border-color: #0078d7; }
+  .btn:active:not(:disabled) { background: #cce4f7; }
+  .btn:disabled { color: #9a9a9a; }
+  .btn.primary { min-width: 84px; }
+  #btnCancel { min-width: 84px; }
+  .btn.small { padding: 2px 10px; min-height: 22px; color: #0066cc; border-color: transparent; background: transparent; }
+  .btn.small:hover { color: #005a9e; background: transparent; border-color: transparent; text-decoration: underline; }
+</style>
+</head>
+<body class="details-hidden">
+  <div class="panel" id="panel">
+    <div class="section">
+      <h2>任务信息</h2>
+      <div class="urlline" id="url"></div>
+      <div class="info">
+        <div class="k"><span data-i18n="pg_status">下载状态</span>：</div><div class="v status" id="stStatus">正在接收数据...</div>
+        <div class="k" data-i18n="pg_size">文件大小</div><div class="v" id="stSize">—</div>
+        <div class="k" data-i18n="pg_done">已经下载</div><div class="v" id="stDone">—</div>
+        <div class="k" data-i18n="pg_speed">传输速度</div><div class="v" id="stSpeed">—</div>
+        <div class="k" data-i18n="pg_eta">剩余时间</div><div class="v" id="stEta">—</div>
+        <div class="k" data-i18n="pg_resume">能否续传</div><div class="v" id="stResume">—</div>
+      </div>
+    </div>
+
+    <div class="section sec-extra">
+      <h2>下载进度</h2>
+      <div class="overall"><i id="ovBar"></i><b id="ovPct">0%</b></div>
+      <div class="blocklabel" id="blockLabel">各线程的起始位置以及下载进度</div>
+      <canvas id="blocks" width="640" height="22"></canvas>
+    </div>
+
+    <div class="section sec-threads">
+      <h2 id="threadTitle">线程明细</h2>
+      <div class="threads">
+        <table>
+          <thead><tr><th class="col-n" id="threadColN">N.</th><th class="col-dl">已经下载</th><th data-i18n="pg_info">信息</th></tr></thead>
+          <tbody id="threadBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <button class="btn small" id="toggleDetails">&gt;&gt; 显示细节</button>
+    <div class="spacer"></div>
+    <button class="btn primary" id="btnPauseResume" data-i18n="pg_pause">暂停</button>
+    <button class="btn" id="btnCancel" data-i18n="pg_cancel">取消</button>
+  </div>
+
+  <script src="fdm-bridge.js"></script>
+  <script src="progress.js?v=2026102501"></script>
+</body>
+</html>

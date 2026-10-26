@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FDM",
+  "version": "1.0.7",
+  "identifier": "com.fdm.desktop",
+  "build": {
+    "frontendDist": "../app_ui",
+    "beforeBuildCommand": "node scripts/package-amule.mjs"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "FDM 极速多线程下载器",
+    "longDescription": "基于 Rust 与 Tauri 2 的跨平台多线程下载管理器",
+    "windows": {
+      "nsis": {
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
+    "resources": [
+      "resources/amule/**/*"
+    ],
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4MEY5OUU5QUE2QTQxMzkKUldRNVFXcXE2WmtQT0xjUWRaNE9lbis5bG5LUUdvOHRTMjRVdFQwdDlXczRrVG82bE16TVNKV3YK",
+      "endpoints": [
+        "https://github.com/ZHDeveloper/fdm-rust/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

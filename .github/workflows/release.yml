@@ -1,0 +1,186 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: fdm-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release version
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Calculate next patch version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          LATEST_TAG="$(git tag --list 'v[0-9]*' | sort -V | tail -n 1 || true)"
+          if [[ -z "${LATEST_TAG}" ]]; then
+            # 首个版本直接使用 package.json 中的版本，例如 1.0.0。
+            VERSION="$(node -p "require('./package.json').version")"
+          else
+            VERSION="${LATEST_TAG#v}"
+            RELEASE_STATE="$(gh release view "${LATEST_TAG}" --json isDraft,isPrerelease \
+              --jq 'if .isDraft then "draft" elif .isPrerelease then "prerelease" else "published" end' \
+              2>/dev/null || true)"
+            if [[ "${RELEASE_STATE}" == "published" ]]; then
+              VERSION="$(node scripts/version.mjs next --base "${LATEST_TAG}")"
+            elif [[ "${RELEASE_STATE}" == "draft" ]]; then
+              gh release delete "${LATEST_TAG}" --yes --cleanup-tag
+            fi
+            # 没有正式 Release 的 tag 直接复用版本；下面会 force 到本次构建提交。
+          fi
+          TAG="v${VERSION}"
+
+          node scripts/version.mjs set "${VERSION}"
+          node scripts/version.mjs check "${VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json Cargo.toml Cargo.lock src-tauri/tauri.conf.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): ${TAG} [skip release]"
+          fi
+          git tag -f "${TAG}"
+          git push origin HEAD:main
+          git push origin "${TAG}" --force
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists"
+          else
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft \
+              --title "FDM v${VERSION}" --notes "FDM v${VERSION}"
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            platform: windows-latest
+            args: --target x86_64-pc-windows-msvc
+          - name: macOS arm64
+            platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - name: macOS x64
+            platform: macos-latest
+            args: --target x86_64-apple-darwin
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Windows packaging tools
+        if: matrix.platform == 'windows-latest'
+        run: python -m pip install --disable-pip-version-check pefile
+
+      - name: Build and upload draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: FDM v__VERSION__
+          releaseBody: "FDM v__VERSION__ Windows x64 / macOS arm64 / macOS x64"
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+  verify-and-publish:
+    name: Verify and publish release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify updater manifest and assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --pattern latest.json --dir verify --clobber
+          jq -e --arg version "${VERSION}" '
+            .version == $version and
+            (.platforms["windows-x86_64"].url | length > 0) and
+            (.platforms["windows-x86_64"].signature | length > 0) and
+            (.platforms["darwin-aarch64"].url | length > 0) and
+            (.platforms["darwin-aarch64"].signature | length > 0) and
+            (.platforms["darwin-x86_64"].url | length > 0) and
+            (.platforms["darwin-x86_64"].signature | length > 0)
+          ' verify/latest.json
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          echo "${ASSETS}"
+          grep -Eq 'setup\.exe$' <<< "${ASSETS}"
+          grep -Eq '\.msi$' <<< "${ASSETS}"
+          grep -Eq '\.app\.tar\.gz$' <<< "${ASSETS}"
+          grep -Eq '\.dmg$' <<< "${ASSETS}"
+          grep -Eq '\.sig$' <<< "${ASSETS}"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest --prerelease=false
+
