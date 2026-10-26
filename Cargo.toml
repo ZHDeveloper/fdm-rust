@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.7"
+version = "1.0.11"
 edition = "2021"
 license = "MIT"
 authors = ["FDM Contributors"]

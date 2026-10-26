@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "fdm-core"
-version = "1.0.7"
+version = "1.0.11"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "fdm-desktop"
-version = "1.0.7"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "fdm-engine"
-version = "1.0.7"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "fdm-platform"
-version = "1.0.7"
+version = "1.0.11"
 dependencies = [
  "arboard",
  "fdm-core",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "fdm-server"
-version = "1.0.7"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "async-trait",
