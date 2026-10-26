@@ -6,7 +6,7 @@ use anyhow::anyhow;
 use fdm_core::{filename_from_headers_or_url, is_eligible_github_url, Settings, USER_AGENT};
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH,
-    CONTENT_RANGE, CONTENT_TYPE, RANGE,
+    CONTENT_RANGE, CONTENT_TYPE, RANGE, SERVER,
 };
 use reqwest::Client;
 
@@ -15,6 +15,8 @@ pub struct ProbeResult {
     pub supports_range: bool,
     pub total: Option<u64>,
     pub filename: String,
+    /// 腾讯 EdgeOne WAF 会拦截并发 Range 请求，只能单连接顺序下载。
+    pub edgeone: bool,
 }
 
 pub fn build_client(settings: &Settings) -> anyhow::Result<Client> {
@@ -110,6 +112,7 @@ async fn probe_inner(
     let headers = headers_map(custom);
     let mut supports_range = false;
     let mut total: Option<u64> = None;
+    let mut edgeone = false;
     let mut resolved_headers = HeaderMap::new();
 
     if let Ok(resp) = client
@@ -119,6 +122,7 @@ async fn probe_inner(
         .send()
         .await
     {
+        edgeone = is_edgeone_waf(resp.status().as_u16(), resp.headers());
         if resp.status().as_u16() < 400 {
             resolved_headers = resp.headers().clone();
             if !is_html_error(url, &resolved_headers) {
@@ -142,6 +146,7 @@ async fn probe_inner(
         {
             let status = resp.status().as_u16();
             let get_headers = resp.headers().clone();
+            edgeone |= is_edgeone_waf(status, &get_headers);
             if is_html_error(url, &get_headers) {
                 // GitHub 二进制下载被镜像换成了 HTML 错误页。
                 total = None;
@@ -207,6 +212,7 @@ async fn probe_inner(
         supports_range,
         total,
         filename,
+        edgeone,
     })
 }
 
@@ -281,6 +287,17 @@ pub async fn fetch_torrent_bytes_candidates(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("没有可用的种子文件地址")))
+}
+
+/// 腾讯 EdgeOne WAF：返回 567，或带 `EO-*` / `Server: EdgeOne` 响应头。
+fn is_edgeone_waf(status: u16, headers: &HeaderMap) -> bool {
+    status == 567
+        || headers
+            .keys()
+            .any(|name| name.as_str().to_ascii_lowercase().starts_with("eo-"))
+        || header_text(headers, SERVER)
+            .to_ascii_lowercase()
+            .contains("edgeone")
 }
 
 fn header_text(headers: &HeaderMap, name: HeaderName) -> String {
@@ -372,6 +389,21 @@ mod tests {
             &headers
         ));
         assert!(!is_html_error("https://github.com/a/b", &headers));
+    }
+
+    #[test]
+    fn detects_edgeone_waf() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("eo-log-uuid"),
+            HeaderValue::from_static("x"),
+        );
+        assert!(is_edgeone_waf(200, &headers));
+        let mut server = HeaderMap::new();
+        server.insert(SERVER, HeaderValue::from_static("EdgeOne"));
+        assert!(is_edgeone_waf(200, &server));
+        assert!(is_edgeone_waf(567, &HeaderMap::new()));
+        assert!(!is_edgeone_waf(200, &HeaderMap::new()));
     }
 
     #[test]

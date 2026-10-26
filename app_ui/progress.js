@@ -101,8 +101,10 @@ function render() {
   const blocks = $('#blocks');
   const threads = document.querySelector('.sec-threads');
   const toggle = $('#toggleDetails');
-  if (blockLabel) blockLabel.style.display = isP2P ? 'none' : '';
-  if (blocks) blocks.style.display = isP2P ? 'none' : '';
+  // 单连接（含 EdgeOne WAF 单线程）不显示分块进度条。
+  const singleStream = !isP2P && (!snap.segments || snap.segments.length <= 1);
+  if (blockLabel) blockLabel.style.display = (isP2P || singleStream) ? 'none' : '';
+  if (blocks) blocks.style.display = (isP2P || singleStream) ? 'none' : '';
   if (threads) threads.style.display = isP2P ? 'none' : '';
   if (toggle) toggle.style.display = isP2P ? 'none' : '';
   const urlEl = $('#url');

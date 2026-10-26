@@ -2035,6 +2035,7 @@ impl TaskManager {
                     .context("探测下载地址失败")?;
             candidate_index_value = used_index;
             let supports_range = result.supports_range;
+            let edgeone = result.edgeone;
             let (part_path, prealloc_total, layout_persist) = {
                 let mut state = entry.state.lock().await;
                 state.filename = result.filename;
@@ -2044,6 +2045,10 @@ impl TaskManager {
                 state.downloaded = 0;
                 state.progress = 0.0;
                 fdm_core::paths::ensure_dir(&state.dir)?;
+                if edgeone {
+                    tracing::info!(url = %state.url, "检测到 EdgeOne WAF，改用单线程下载");
+                    state.connections = 1;
+                }
                 let total = state.total;
                 let connections = state.connections;
                 let part_path = state.part_path.clone();
