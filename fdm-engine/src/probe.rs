@@ -30,6 +30,8 @@ pub fn build_client(settings: &Settings) -> anyhow::Result<Client> {
         .pool_max_idle_per_host(128)
         .tcp_keepalive(Duration::from_secs(60))
         .tcp_nodelay(true)
+        // 分块并发若复用同一条 HTTP/2 连接，Google 等 CDN 上多流会互相拖死（只有一个流有数据、其余 0 字节），强制 HTTP/1.1 让每个分块独占 TCP。
+        .http1_only()
         .redirect(reqwest::redirect::Policy::limited(10));
 
     if settings.proxy_enabled && !settings.proxy_host.trim().is_empty() {

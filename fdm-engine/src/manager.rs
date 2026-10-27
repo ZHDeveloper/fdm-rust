@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use fdm_core::paths::{atomic_write, resolve_data_dir};
 use fdm_core::*;
 use futures_util::StreamExt;
-use reqwest::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::header::{HeaderValue, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::fs::{File as AsyncFile, OpenOptions as AsyncOpenOptions};
@@ -2459,6 +2459,8 @@ impl TaskManager {
             }
 
             let mut request_headers = headers_map(&headers);
+            // Range 必须针对原始字节；显式 identity 同时覆盖用户自定义的 Accept-Encoding。
+            request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
             request_headers.insert(
                 RANGE,
                 HeaderValue::from_str(&format!("bytes={}-{}", cur, end))?,
@@ -2707,6 +2709,8 @@ impl TaskManager {
                 }
             }
             let mut request_headers = headers_map(&headers);
+            // Range 必须针对原始字节；显式 identity 同时覆盖用户自定义的 Accept-Encoding。
+            request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
             if cur > 0 {
                 request_headers.insert(RANGE, HeaderValue::from_str(&format!("bytes={}-", cur))?);
             }
