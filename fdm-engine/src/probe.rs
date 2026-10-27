@@ -355,7 +355,7 @@ fn merge_content_disposition(target: &mut HeaderMap, source: &HeaderMap) {
     }
 }
 
-fn parse_content_range(headers: &HeaderMap) -> Option<(u64, u64, u64)> {
+pub(crate) fn parse_content_range(headers: &HeaderMap) -> Option<(u64, u64, u64)> {
     let value = headers.get(CONTENT_RANGE)?.to_str().ok()?;
     let lower = value.trim().to_ascii_lowercase();
     let rest = lower.strip_prefix("bytes ")?;
@@ -368,7 +368,7 @@ fn parse_content_range(headers: &HeaderMap) -> Option<(u64, u64, u64)> {
     ))
 }
 
-fn parse_content_length(headers: &HeaderMap) -> Option<u64> {
+pub(crate) fn parse_content_length(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())

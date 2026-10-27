@@ -190,6 +190,155 @@ async fn single_stream_download_without_range_support() {
     server.abort();
 }
 
+async fn spawn_chunked_probe_server(fail_first_download: bool) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let data = Arc::new(body());
+    let download_attempts = Arc::new(AtomicUsize::new(0));
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let data = data.clone();
+            let download_attempts = download_attempts.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 16384];
+                let Ok(n) = socket.read(&mut buffer).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                let is_head = request.starts_with("HEAD ");
+                let has_range = request
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("range:"));
+                if is_head {
+                    // 探测拿不到大小：既没有 Content-Length，也没有 Accept-Ranges。
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
+                if has_range {
+                    // Range 探测同样拿不到大小。
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                let attempt = download_attempts.fetch_add(1, Ordering::SeqCst);
+                if fail_first_download && attempt == 0 {
+                    let error_body = b"service unavailable";
+                    let response = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        error_body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.write_all(error_body).await;
+                    return;
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    data.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                for chunk in data.chunks(32 * 1024) {
+                    if socket.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+            });
+        }
+    });
+    (format!("http://{}/unknown-size.bin", addr), handle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_stream_learns_size_from_download_response() {
+    let (url, server) = spawn_chunked_probe_server(false).await;
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let download_dir = temp.path().join("downloads");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&download_dir).unwrap();
+    let settings = Arc::new(SettingsStore::load(&data_dir).unwrap());
+    settings
+        .update_patch(&json!({"defaultDir": download_dir.to_string_lossy()}))
+        .unwrap();
+    let manager = TaskManager::new(Some(data_dir), settings).unwrap();
+    manager.start_scheduler();
+    let snap = manager
+        .add_task(&json!({"url": url, "dir": download_dir.to_string_lossy(), "connections": 8}))
+        .await
+        .unwrap();
+    let mut saw_size_while_downloading = false;
+    let mut final_snap = None;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(s) = manager.get_task(snap.id).await {
+            if s.status == "downloading" && s.total == Some(body().len() as u64) {
+                saw_size_while_downloading = true;
+            }
+            if s.status == "done" || s.status == "error" {
+                final_snap = Some(s);
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_size_while_downloading,
+        "下载中应从响应头补全文件大小"
+    );
+    let snap = final_snap.expect("unknown-size download did not finish");
+    assert_eq!(snap.status, "done", "error: {:?}", snap.error);
+    assert_eq!(snap.total, Some(body().len() as u64));
+    assert_eq!(std::fs::read(&snap.filepath).unwrap(), body());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_stream_ignores_error_response_size() {
+    let (url, server) = spawn_chunked_probe_server(true).await;
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let download_dir = temp.path().join("downloads");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&download_dir).unwrap();
+    let settings = Arc::new(SettingsStore::load(&data_dir).unwrap());
+    settings
+        .update_patch(&json!({"defaultDir": download_dir.to_string_lossy()}))
+        .unwrap();
+    let manager = TaskManager::new(Some(data_dir), settings).unwrap();
+    manager.start_scheduler();
+    let snap = manager
+        .add_task(&json!({"url": url, "dir": download_dir.to_string_lossy(), "connections": 8}))
+        .await
+        .unwrap();
+    let mut saw_error_size = false;
+    let mut final_snap = None;
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(s) = manager.get_task(snap.id).await {
+            if s.total == Some(b"service unavailable".len() as u64) {
+                saw_error_size = true;
+            }
+            if s.status == "done" || s.status == "error" {
+                final_snap = Some(s);
+                break;
+            }
+        }
+    }
+    assert!(!saw_error_size, "错误响应的大小不应写入任务");
+    let snap = final_snap.expect("download after error response did not finish");
+    assert_eq!(snap.status, "done", "error: {:?}", snap.error);
+    assert_eq!(snap.total, Some(body().len() as u64));
+    assert_eq!(std::fs::read(&snap.filepath).unwrap(), body());
+    server.abort();
+}
+
 fn large_body() -> Vec<u8> {
     (0..2_000_000u32).map(|i| (i % 253) as u8).collect()
 }

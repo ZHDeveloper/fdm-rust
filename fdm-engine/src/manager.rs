@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::bt::{BtEngine, BtSource, BtState};
 use crate::ed2k::{Ed2kEngine, Ed2kState};
 use crate::probe::{
-    fetch_torrent_bytes_candidates, headers_map, probe_candidates, HttpClientCache,
+    fetch_torrent_bytes_candidates, headers_map, parse_content_length, parse_content_range,
+    probe_candidates, HttpClientCache,
 };
 use crate::task::TaskEntry;
 
@@ -30,6 +31,16 @@ fn normalize_path(path: &str) -> String {
     path.replace('/', "\\")
         .trim_end_matches('\\')
         .to_lowercase()
+}
+
+/// 探测没拿到大小时，从真实下载响应补全（206 的 Content-Range 或 200 的 Content-Length）。
+fn response_total(status: u16, headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let total = match status {
+        206 => parse_content_range(headers).map(|(_, _, total)| total),
+        200 => parse_content_length(headers),
+        _ => None,
+    };
+    total.filter(|total| *total > 0)
 }
 
 async fn wait_task_stopped(entry: &Arc<TaskEntry>, timeout: Duration) {
@@ -2703,6 +2714,7 @@ impl TaskManager {
                     used_index,
                 )
             };
+            let mut total = total;
             if let Some(total) = total {
                 if cur >= total {
                     break;
@@ -2770,6 +2782,20 @@ impl TaskManager {
                 return Err(anyhow!("响应长度与预期不一致"));
             }
             failures = 0;
+
+            // 探测没拿到大小时，用成功响应补全，保证文件大小/剩余时间可用。
+            if total.is_none() {
+                if let Some(discovered) = response_total(status, resp.headers()) {
+                    total = Some(discovered);
+                    let mut state = entry.state.lock().await;
+                    state.total = Some(discovered);
+                    if let Some(segment) = state.segments.get_mut(0) {
+                        segment.end = discovered.saturating_sub(1);
+                    }
+                    state.refresh_progress();
+                    state.save_cfg();
+                }
+            }
 
             let mut offset = cur;
             if status == 200 && cur > 0 {
@@ -2938,6 +2964,21 @@ mod tests {
         let settings = Arc::new(SettingsStore::load(dir).unwrap());
         settings.update_patch(&patch).unwrap();
         TaskManager::new(Some(dir.to_path_buf()), settings).unwrap()
+    }
+
+    #[test]
+    fn response_total_uses_status_specific_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("100"));
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 0-99/500"));
+        assert_eq!(response_total(206, &headers), Some(500));
+        assert_eq!(response_total(200, &headers), Some(100));
+        headers.remove(CONTENT_RANGE);
+        // 206 的 Content-Length 只是区间长度，不能当作文件总大小。
+        assert_eq!(response_total(206, &headers), None);
+        assert_eq!(response_total(200, &headers), Some(100));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+        assert_eq!(response_total(200, &headers), None);
     }
 
     #[test]
