@@ -1,10 +1,12 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: "Segoe UI", "Microsoft YaHei", Tahoma, sans-serif;
-  font-size: 12px; color: #1a1a1a; user-select: none;
+  font-size: 12px; color: #1a1a1a; -webkit-user-select: none; user-select: none;
   background: #f0f0f0; height: 100vh; display: flex; flex-direction: column;
   overflow: hidden;
 }
+
+input, textarea { -webkit-user-select: text; user-select: text; }
 
 /* ===== 自定义标题栏（浅色专业风，低调但清晰） ===== */
 .titlebar {
@@ -126,7 +128,7 @@ table.tasks { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .tasks td:nth-child(3) { font-weight: 600; }
 .col-resizer {
   position: absolute; top: 0; right: 0; width: 6px; height: 100%;
-  cursor: col-resize; user-select: none;
+  cursor: col-resize; -webkit-user-select: none; user-select: none;
 }
 .tasks thead th { white-space: nowrap; }
 .pbar { height: 13px; background: #e4e6e8; border: 1px solid #cfd2d6; border-radius: 2px; overflow: hidden; position: relative; }

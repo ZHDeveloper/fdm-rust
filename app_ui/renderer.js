@@ -73,6 +73,7 @@ function initColResize() {
       dragging = true;
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
+      document.body.style.webkitUserSelect = 'none';
       const onMove = (ev) => {
         if (!dragging) return;
         nameWidth = Math.round(Math.max(minNameWidth(), startW + (ev.clientX - startX)));
@@ -85,6 +86,7 @@ function initColResize() {
         dragging = false;
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
+        document.body.style.webkitUserSelect = '';
         try {
           const cur = JSON.parse(localStorage.getItem(KEY) || '{}');
           cur.name = nameWidth;

@@ -7,7 +7,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body { font-family: "Segoe UI","Microsoft YaHei",Tahoma,sans-serif; font-size: 11px; color: #1a1a1a;
-    background: #f0f0f0; display: flex; flex-direction: column; overflow: hidden; user-select: none; }
+    background: #f0f0f0; display: flex; flex-direction: column; overflow: hidden; -webkit-user-select: none; user-select: none; }
 
   /* 选项卡：仿 IDM / Win32 扁平样式 */
   .tabs { display: flex; gap: 0; padding: 6px 8px 0; background: #f0f0f0;
@@ -89,10 +89,11 @@
   .update-status { color: #555; min-height: 18px; }
   .update-notes { margin-top: 8px; max-height: 104px; overflow: auto; white-space: pre-wrap;
     background: #fff; border: 0.5px solid rgba(0,0,0,0.15); border-radius: 4px; padding: 6px 8px;
-    color: #333; user-select: text; display: none; }
+    color: #333; -webkit-user-select: text; user-select: text; display: none; }
   .update-bar { height: 8px; background: #d8d8d8; border-radius: 4px; overflow: hidden; margin-top: 8px; display: none; }
   .update-bar span { display: block; height: 100%; width: 0; background: #0078d7; transition: width .15s ease; }
   .btn { min-width: 84px; }
+  input, textarea { -webkit-user-select: text; user-select: text; }
 </style>
 </head>
 <body>
