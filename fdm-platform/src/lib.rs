@@ -626,7 +626,7 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn sync_auto_launch_impl(enabled: bool) -> bool {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     let Ok(home) = std::env::var("HOME") else {
         return false;
     };
@@ -679,30 +679,41 @@ fn sync_auto_launch_impl(enabled: bool) -> bool {
 <key>RunAtLoad</key><true/><key>KeepAlive</key><false/>
 </dict></plist>"#
     );
-    // 每次启动都重新 load 会让 RunAtLoad 立刻再拉起一次 open -a，在 --background 启动时
-    // 触发 macOS 的 Reopen 事件，把刚隐藏的主窗口又显示出来。内容未变时跳过重复加载。
+    let loaded = Command::new("launchctl")
+        .args(["list", "com.fdm.desktop"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
     let current = std::fs::read_to_string(&plist).map(|old| old == xml).unwrap_or(false);
-    if current {
+    if current && loaded {
         return true;
     }
-    if std::fs::write(&plist, xml).is_err() {
+    if loaded {
+        // 已注册但内容有变化（例如升级后参数变化）：只更新文件，下次登录生效，
+        // 避免立即 reload 时 RunAtLoad 再次拉起应用并触发 Reopen 显示主窗口。
+        return std::fs::write(&plist, xml).is_ok();
+    }
+    // 未注册时用 RunAtLoad=false 的临时 plist 完成注册，避免在本次启动中再拉起一次应用；
+    // 注册后恢复真实 plist，下次登录由 launchd 正常启动。
+    let idle = xml.replace(
+        "<key>RunAtLoad</key><true/>",
+        "<key>RunAtLoad</key><false/>",
+    );
+    if std::fs::write(&plist, &idle).is_err() {
         return false;
     }
-    // 后台启动时不能立即 load：RunAtLoad 会再拉起一次本应用并触发 Reopen 显示主窗口。
-    // 只写 plist，本次登录保持静默，下次登录由 launchd 自动加载。
-    if std::env::args().any(|arg| arg == "--background") {
-        return true;
-    }
-    let _ = Command::new("launchctl")
-        .args(["unload", "-w"])
-        .arg(&plist)
-        .status();
-    Command::new("launchctl")
+    let registered = Command::new("launchctl")
         .args(["load", "-w"])
         .arg(&plist)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if std::fs::write(&plist, xml).is_err() {
+        return false;
+    }
+    registered
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
