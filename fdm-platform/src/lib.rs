@@ -654,6 +654,7 @@ fn sync_auto_launch_impl(enabled: bool) -> bool {
         Some(bundle) => (
             "/usr/bin/open".to_string(),
             vec![
+                "-g".to_string(),
                 "-a".to_string(),
                 bundle.to_string_lossy().into_owned(),
                 "--args".to_string(),
@@ -678,8 +679,19 @@ fn sync_auto_launch_impl(enabled: bool) -> bool {
 <key>RunAtLoad</key><true/><key>KeepAlive</key><false/>
 </dict></plist>"#
     );
+    // 每次启动都重新 load 会让 RunAtLoad 立刻再拉起一次 open -a，在 --background 启动时
+    // 触发 macOS 的 Reopen 事件，把刚隐藏的主窗口又显示出来。内容未变时跳过重复加载。
+    let current = std::fs::read_to_string(&plist).map(|old| old == xml).unwrap_or(false);
+    if current {
+        return true;
+    }
     if std::fs::write(&plist, xml).is_err() {
         return false;
+    }
+    // 后台启动时不能立即 load：RunAtLoad 会再拉起一次本应用并触发 Reopen 显示主窗口。
+    // 只写 plist，本次登录保持静默，下次登录由 launchd 自动加载。
+    if std::env::args().any(|arg| arg == "--background") {
+        return true;
     }
     let _ = Command::new("launchctl")
         .args(["unload", "-w"])
