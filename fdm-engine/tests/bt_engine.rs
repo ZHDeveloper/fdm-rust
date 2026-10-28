@@ -225,3 +225,23 @@ async fn bt_engine_reattaches_persisted_torrent_after_restart() {
         engine.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn bt_engine_loads_active_trackers_and_merges_cache() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("bt");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let custom_tracker = "udp://custom.test.tracker:6969/announce";
+    let cache_file = root.join("trackers.txt");
+    std::fs::write(&cache_file, format!("{custom_tracker}\n# comment\ninvalid_url\n")).unwrap();
+
+    let settings = Arc::new(SettingsStore::load(td.path()).unwrap());
+    let engine = BtEngine::new(td.path(), settings).await.unwrap();
+    let trackers = engine.active_trackers().await;
+
+    assert!(trackers.iter().any(|t| t == custom_tracker), "本地缓存 tracker 应合并进内存列表");
+    assert!(trackers.iter().any(|t| t.contains("opentrackr")), "内置公共 tracker 应保留");
+    assert!(!trackers.iter().any(|t| t == "invalid_url"), "无效 url 应被清洗");
+    engine.shutdown().await;
+}

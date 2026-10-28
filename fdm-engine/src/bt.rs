@@ -57,6 +57,18 @@ const PUBLIC_TRACKERS: &[&str] = &[
     "https://tracker.nekomi.cn:443/announce",
     "https://tr.nyacat.pw:443/announce",
     "https://ht.therarbg.to:443/announce",
+    // 补入当前优质高存活 Tracker (XIU2/TrackersListCollection 推荐列表)
+    "udp://tracker.lolicon.app:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://p4p.arenabg.com:1337/announce",
+    "udp://movies.zsw.ca:6969/announce",
+    "udp://tracker.filemail.com:6969/announce",
+    "udp://tracker.tamersunion.org:443/announce",
+    "udp://tracker.altrosky.nl:6969/announce",
+    "udp://bt1.archive.org:6969/announce",
+    "udp://bt2.archive.org:6969/announce",
+    "https://tracker.tamersunion.org:443/announce",
+    "https://tracker.lolicon.app:443/announce",
 ];
 
 /// DHT 引导节点。与迅雷 DownloadSDK 内置的 OriginNodes 完全一致。
@@ -68,6 +80,73 @@ const DHT_BOOTSTRAP: &[&str] = &[
     "dht.libtorrent.org:25401",
 ];
 
+
+/// 判断文件是否需要刷新（不存在或修改时间超过 TTL）。
+fn should_refresh(path: &Path, ttl: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true;
+    };
+    if meta.len() == 0 {
+        return true;
+    }
+    let Ok(modified) = meta.modified() else {
+        return true;
+    };
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age > ttl)
+        .unwrap_or(true)
+}
+
+/// 读取本地缓存的 Tracker 列表，并与内置列表合并去重。
+fn load_or_init_trackers(cache_path: &Path) -> Vec<String> {
+    let mut set: HashSet<String> = PUBLIC_TRACKERS.iter().map(|s| s.to_string()).collect();
+    if let Ok(content) = std::fs::read_to_string(cache_path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.is_empty() && !line.starts_with('#') && Url::parse(line).is_ok() {
+                set.insert(line.to_string());
+            }
+        }
+    }
+    let mut list: Vec<String> = set.into_iter().collect();
+    list.sort();
+    list
+}
+
+/// 后台多源拉取最新 Tracker 列表并清洗验证。
+async fn fetch_latest_trackers(client: &reqwest::Client, cache_file: &Path) -> Option<Vec<String>> {
+    let mut candidate_urls = vec![
+        "https://cf.trackerslist.com/best.txt".to_string(),
+        "https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best.txt".to_string(),
+    ];
+    for proxy in fdm_core::GITHUB_PROXY_PRESETS {
+        candidate_urls.push(format!(
+            "{proxy}https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
+        ));
+    }
+    candidate_urls.push("https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt".to_string());
+
+    for url in candidate_urls {
+        if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(8)).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let trackers: Vec<String> = text
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty() && !l.starts_with('#') && Url::parse(l).is_ok())
+                        .collect();
+                    if trackers.len() >= 5 {
+                        let _ = paths::atomic_write(cache_file, text.as_bytes());
+                        tracing::info!(count = trackers.len(), source = %url, "BT Tracker 动态更新成功");
+                        return Some(trackers);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 /// BT 任务的来源。
 #[derive(Debug, Clone)]
 pub enum BtSource {
@@ -117,6 +196,7 @@ pub struct BtEngine {
     handles: RwLock<HashMap<i64, TorrentHandle>>,
     _settings: Arc<SettingsStore>,
     peer_limit: usize,
+    active_trackers: Arc<RwLock<Vec<String>>>,
 }
 
 impl BtEngine {
@@ -153,7 +233,10 @@ impl BtEngine {
         } else {
             None
         };
-        let global_trackers: HashSet<Url> = PUBLIC_TRACKERS
+        let cache_file = root.join("trackers.txt");
+        let initial_trackers = load_or_init_trackers(&cache_file);
+        let active_trackers = Arc::new(RwLock::new(initial_trackers.clone()));
+        let global_trackers: HashSet<Url> = initial_trackers
             .iter()
             .filter_map(|t| Url::parse(t).ok())
             .collect();
@@ -186,12 +269,38 @@ impl BtEngine {
         for handle in restored.into_inner() {
             let _ = session.pause(&handle).await;
         }
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             session,
             handles: RwLock::new(HashMap::new()),
             _settings: settings,
             peer_limit: bt.max_peers as usize,
-        }))
+            active_trackers: active_trackers.clone(),
+        });
+
+        // 后台静默拉取更新，TTL 24 小时，不阻塞启动
+        let bg_trackers = active_trackers;
+        let bg_cache = cache_file;
+        tokio::spawn(async move {
+            let ttl = Duration::from_secs(24 * 3600);
+            if should_refresh(&bg_cache, ttl) {
+                let http = reqwest::Client::builder()
+                    .user_agent(fdm_core::USER_AGENT)
+                    .timeout(Duration::from_secs(8))
+                    .build()
+                    .unwrap_or_default();
+                if let Some(fetched) = fetch_latest_trackers(&http, &bg_cache).await {
+                    let mut set: HashSet<String> = PUBLIC_TRACKERS.iter().map(|s| s.to_string()).collect();
+                    for t in fetched {
+                        set.insert(t);
+                    }
+                    let mut merged: Vec<String> = set.into_iter().collect();
+                    merged.sort();
+                    *bg_trackers.write().await = merged;
+                }
+            }
+        });
+
+        Ok(engine)
     }
 
     pub fn listen_port(&self) -> u16 {
@@ -266,7 +375,7 @@ impl BtEngine {
                     output_folder: Some(dir.to_string_lossy().into_owned()),
                     peer_limit: Some(self.peer_limit),
                     initial_peers,
-                    trackers: Some(PUBLIC_TRACKERS.iter().map(|t| t.to_string()).collect()),
+                    trackers: Some(self.active_trackers.read().await.clone()),
                     force_tracker_interval: Some(Duration::from_secs(60)),
                     ..Default::default()
                 }),
@@ -368,6 +477,10 @@ impl BtEngine {
             files: stats.file_progress,
             error: stats.error,
         })
+    }
+
+    pub async fn active_trackers(&self) -> Vec<String> {
+        self.active_trackers.read().await.clone()
     }
 
     pub async fn pause(&self, id: i64) -> bool {

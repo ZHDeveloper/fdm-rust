@@ -74,6 +74,57 @@ pub struct Ed2kEngine {
     job: AtomicUsize,
 }
 
+/// 判断文件是否需要刷新（不存在或修改时间超过 TTL）。
+fn should_refresh(path: &Path, ttl: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return true;
+    };
+    if meta.len() == 0 {
+        return true;
+    }
+    let Ok(modified) = meta.modified() else {
+        return true;
+    };
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age > ttl)
+        .unwrap_or(true)
+}
+
+/// 后台从多源回退下载并校验二进制列表（如 nodes.dat / server.met）。
+async fn download_and_verify_binary(
+    client: &Client,
+    urls: &[String],
+    target_path: &Path,
+    min_bytes: usize,
+) -> bool {
+    for url in urls {
+        match client.get(url).timeout(Duration::from_secs(10)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(bytes) = resp.bytes().await {
+                    if bytes.len() >= min_bytes
+                        && !bytes.starts_with(b"<!DOCTYPE")
+                        && !bytes.starts_with(b"<html")
+                        && !bytes.starts_with(b"<HTML")
+                    {
+                        if let Ok(()) = paths::atomic_write(target_path, &bytes) {
+                            tracing::info!(path = ?target_path, url = %url, bytes = bytes.len(), "ED2K 节点列表更新成功");
+                            return true;
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::debug!(url = %url, status = %resp.status(), "ED2K 源响应非成功状态");
+            }
+            Err(err) => {
+                tracing::debug!(url = %url, error = %err, "ED2K 源请求失败，尝试下一镜像");
+            }
+        }
+    }
+    false
+}
+
 impl Ed2kEngine {
     pub async fn new(
         data_dir: &Path,
@@ -161,13 +212,55 @@ impl Ed2kEngine {
             )
             .await;
 
-        let engine_bg = engine.clone();
+                let engine_bg = engine.clone();
         let server_url = ed2k.server_met_url.clone();
         let nodes_url = ed2k.nodes_dat_url.clone();
+        let config_dir_bg = config_dir.clone();
         tokio::spawn(async move {
-            // 先补服务器列表与 Kad 节点，再建立连接；顺序反过来会在服务器列表为空时
-            // 连接失败，首轮拿不到 source，表现为“很慢/一直等待”。
-            if !server_url.trim().is_empty() {
+            let http = Client::builder()
+                .user_agent(fdm_core::USER_AGENT)
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+            let ttl = Duration::from_secs(24 * 3600);
+
+            // 1. 同步 nodes.dat (Kad 引导节点)
+            let nodes_file = config_dir_bg.join("nodes.dat");
+            let nodes_synced = if should_refresh(&nodes_file, ttl) {
+                let mut candidates = vec![
+                    nodes_url.clone(),
+                    "https://upd.emule-security.org/nodes.dat".to_string(),
+                    "https://nodes-dat.com/nodes.dat".to_string(),
+                    "http://www.kademlia.ru/download/nodes.dat".to_string(),
+                ];
+                for proxy in fdm_core::GITHUB_PROXY_PRESETS {
+                    candidates.push(format!(
+                        "{proxy}https://raw.githubusercontent.com/alantany/emule-nodes/master/nodes.dat"
+                    ));
+                }
+                candidates.retain(|u| !u.trim().is_empty());
+                download_and_verify_binary(&http, &candidates, &nodes_file, 512).await
+            } else {
+                true
+            };
+
+            // 2. 同步 server.met (ED2K 服务器列表)
+            let server_file = config_dir_bg.join("server.met");
+            let server_synced = if should_refresh(&server_file, ttl) {
+                let mut candidates = vec![
+                    server_url.clone(),
+                    "https://upd.emule-security.org/server.met".to_string(),
+                    "http://www.gruk.org/server.met".to_string(),
+                    "http://www.peerdates.com/servers.met".to_string(),
+                ];
+                candidates.retain(|u| !u.trim().is_empty());
+                download_and_verify_binary(&http, &candidates, &server_file, 128).await
+            } else {
+                true
+            };
+
+            // 仅在 Rust 端多源更新失败时，作为回退让 amuled 原生重试远端 URL
+            if !server_synced && !server_url.trim().is_empty() {
                 let _ = engine_bg
                     .request(
                         Method::POST,
@@ -176,7 +269,7 @@ impl Ed2kEngine {
                     )
                     .await;
             }
-            if !nodes_url.trim().is_empty() {
+            if !nodes_synced && !nodes_url.trim().is_empty() {
                 let _ = engine_bg
                     .request(
                         Method::POST,
@@ -193,7 +286,6 @@ impl Ed2kEngine {
                     Some(json!({"network":"both"})),
                 )
                 .await;
-            // 已有 server.met 时 amuled 启动瞬间会自动连接；再补一次，确保首次安装也连上。
             tokio::time::sleep(Duration::from_secs(3)).await;
             let _ = engine_bg
                 .request(
