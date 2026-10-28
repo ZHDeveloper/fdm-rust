@@ -129,9 +129,8 @@ impl BtEngine {
         paths::ensure_dir(&root.join("session"))?;
         paths::ensure_dir(&root.join("dht"))?;
 
-        let rate = settings.get().max_rate_kb.saturating_mul(1024);
         let ratelimits = LimitsConfig {
-            download_bps: NonZeroU32::new(rate.min(u32::MAX as u64) as u32),
+            download_bps: None,
             upload_bps: None,
         };
         // 双栈监听 + UPnP 端口映射，尽量拿到 IPv6 peer 与可回连端口（更多 peer = 更快）。

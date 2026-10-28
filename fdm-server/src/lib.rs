@@ -612,9 +612,6 @@ async fn update_settings(State(state): State<ServerState>, Json(patch): Json<Val
                     tokio::task::spawn_blocking(move || platform.sync_file_associations(enabled))
                         .await;
             }
-            if patch.get("maxRateKB").is_some() {
-                state.manager.set_global_rate(updated.max_rate_kb).await;
-            }
             if patch.get("defaultDir").is_some() {
                 state.manager.apply_default_dir(&updated.default_dir).await;
             }

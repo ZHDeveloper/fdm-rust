@@ -232,8 +232,6 @@ async fn capture_body(
             return Err(err);
         }
     };
-    let max_rate = state.settings.get().max_rate_kb.saturating_mul(1024);
-    let started = Instant::now();
     let mut written = 0u64;
     let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
     let mut last_sample = Instant::now();
@@ -267,14 +265,6 @@ async fn capture_body(
             return Err(err.into());
         }
         written += chunk.len() as u64;
-        if max_rate > 0 {
-            // 捕获走浏览器真实请求，限速只能靠回压上游读取。
-            let target = written as f64 / max_rate as f64;
-            let elapsed = started.elapsed().as_secs_f64();
-            if target > elapsed {
-                tokio::time::sleep(Duration::from_secs_f64(target - elapsed)).await;
-            }
-        }
         if last_emit.elapsed() >= PROGRESS_INTERVAL {
             let dt = last_sample.elapsed().as_secs_f64().max(0.001);
             let speed = (written - last_bytes) as f64 / dt;

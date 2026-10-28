@@ -300,7 +300,6 @@ impl TaskManager {
             match fdm_core::paths::read_json::<Vec<SavedTask>>(&tasks_file) {
                 Ok(saved) => {
                     let settings_snapshot = settings.get();
-                    let global_rate = settings_snapshot.max_rate_kb.saturating_mul(1024);
                     for item in saved {
                         if item.id <= 0 {
                             continue;
@@ -310,7 +309,7 @@ impl TaskManager {
                             item,
                             Path::new(&settings_snapshot.default_dir),
                             settings_snapshot.default_connections as usize,
-                            global_rate,
+                            0,
                         );
                         tasks.insert(data.id, Arc::new(TaskEntry::new(data)));
                     }
@@ -488,7 +487,7 @@ impl TaskManager {
             &dir,
             Some(name),
             1,
-            settings.max_rate_kb.saturating_mul(1024),
+            0,
             false,
             HashMap::new(),
         );
@@ -702,11 +701,7 @@ impl TaskManager {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let rate_explicit = explicit_rate > 0;
-        let max_rate = if rate_explicit {
-            explicit_rate
-        } else {
-            settings.max_rate_kb.saturating_mul(1024)
-        };
+        let max_rate = explicit_rate;
         let mut custom_headers = HashMap::new();
         if let Some(obj) = opts.get("headers").and_then(Value::as_object) {
             for (k, v) in obj {
@@ -919,11 +914,7 @@ impl TaskManager {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let rate_explicit = explicit_rate > 0;
-        let max_rate = if rate_explicit {
-            explicit_rate
-        } else {
-            settings.max_rate_kb.saturating_mul(1024)
-        };
+        let max_rate = explicit_rate;
 
         let mut info_hash: Option<String> = None;
         let mut ed2k_hash: Option<String> = None;
@@ -1556,23 +1547,7 @@ impl TaskManager {
         true
     }
 
-    pub async fn set_global_rate(&self, kb_per_sec: u64) {
-        let rate = kb_per_sec.saturating_mul(1024);
-        for entry in self.entries() {
-            let mut state = entry.state.lock().await;
-            if !state.rate_explicit {
-                state.max_rate = rate;
-                entry.limiter.set_rate(rate);
-            }
-        }
-        if let Some(engine) = self.bt_engine() {
-            engine.set_global_rate(kb_per_sec).await;
-        }
-        if let Some(engine) = self.ed2k_engine() {
-            engine.set_global_rate(kb_per_sec).await;
-        }
-        let _ = self.save_tasks().await;
-    }
+    pub async fn set_global_rate(&self, _kb_per_sec: u64) {}
 
     /// 默认下载目录变化时同步给 ED2K 引擎；BT 在下次添加任务时直接使用新目录。
     pub async fn apply_default_dir(&self, dir: &str) {

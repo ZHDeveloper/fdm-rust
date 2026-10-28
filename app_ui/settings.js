@@ -187,8 +187,7 @@ function initTabs() {
 }
 
 const DEFAULTS = {
-  defaultConnections: 8, maxConcurrent: 5, maxRateKB: 0,
-  autoDownload: true, monitorClipboard: true, deleteTaskFiles: true,
+  defaultConnections: 8, maxConcurrent: 5, autoDownload: true, monitorClipboard: true, deleteTaskFiles: true,
   doneOpenFolder: true, doneOpenFile: false, doneCloseProgress: true, autoLaunch: true,
   fileAssociations: true,
   githubProxyEnabled: true, githubProxyUrl: '', githubProxyFallbackDirect: true,
@@ -223,7 +222,6 @@ function fill(s) {
   updateRangeProgress($('#connRange'));
   $('#maxConcurrent').value = s.maxConcurrent || 5;
   $('#defaultDir').value = s.defaultDir || '';
-  $('#maxRate').value = s.maxRateKB || 0;
   if ($('#autoDownload')) $('#autoDownload').checked = s.autoDownload !== false;
   if ($('#doneOpenFolder')) $('#doneOpenFolder').checked = !!s.doneOpenFolder;
   if ($('#doneOpenFile')) $('#doneOpenFile').checked = !!s.doneOpenFile;
@@ -408,7 +406,6 @@ function collect() {
     defaultConnections: Math.max(1, Math.min(parseInt($('#connRange').value) || 8, 32)),
     maxConcurrent: Math.max(1, Math.min(parseInt($('#maxConcurrent').value) || 5, 20)),
     defaultDir: $('#defaultDir').value,
-    maxRateKB: Math.max(0, parseInt($('#maxRate').value) || 0),
     autoDownload: $('#autoDownload') ? $('#autoDownload').checked : true,
     doneOpenFolder: $('#doneOpenFolder') ? $('#doneOpenFolder').checked : false,
     doneOpenFile: $('#doneOpenFile') ? $('#doneOpenFile').checked : false,

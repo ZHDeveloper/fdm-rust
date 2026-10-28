@@ -68,8 +68,6 @@ pub struct Settings {
     pub default_dir: String,
     pub default_connections: u32,
     pub max_concurrent: u32,
-    #[serde(rename = "maxRateKB")]
-    pub max_rate_kb: u64,
     pub bt: BtSettings,
     pub ed2k: Ed2kSettings,
     pub auto_download: bool,
@@ -117,7 +115,6 @@ impl Default for Settings {
             default_dir: system_download_dir().to_string_lossy().into_owned(),
             default_connections: 8,
             max_concurrent: 5,
-            max_rate_kb: 0,
             bt: BtSettings::default(),
             ed2k: Ed2kSettings::default(),
             auto_download: true,
@@ -316,7 +313,6 @@ mod tests {
     fn defaults_keep_legacy_camel_case() {
         let value = serde_json::to_value(Settings::default()).unwrap();
         assert!(value.get("defaultDir").is_some());
-        assert!(value.get("maxRateKB").is_some());
         assert!(value.get("autoLaunchDefaultMigrated").is_some());
         assert!(value.get("fileAssociations").is_some());
         assert!(value.get("extensionGuideShown").is_some());
