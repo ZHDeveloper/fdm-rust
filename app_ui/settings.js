@@ -290,8 +290,6 @@ function fill(s) {
   if ($('#ed2kUdp')) $('#ed2kUdp').value = ed.udpPort || 4672;
   if ($('#ed2kEc')) $('#ed2kEc').value = ed.ecPort || 14712;
   if ($('#ed2kApi')) $('#ed2kApi').value = ed.apiPort || 14713;
-  if ($('#ed2kServerMet')) $('#ed2kServerMet').value = ed.serverMetUrl || '';
-  if ($('#ed2kNodesDat')) $('#ed2kNodesDat').value = ed.nodesDatUrl || '';
   if ($('#ed2kShare')) $('#ed2kShare').checked = !!ed.shareCompleted;
   if ($('#ed2kLimit')) $('#ed2kLimit').value = ed.downloadLimitKB || 0;
   refreshEngineStatus();
@@ -449,8 +447,8 @@ function collect() {
       udpPort: Math.max(1, Math.min(parseInt($('#ed2kUdp') ? $('#ed2kUdp').value : 4672) || 4672, 65535)),
       ecPort: Math.max(1, Math.min(parseInt($('#ed2kEc') ? $('#ed2kEc').value : 14712) || 14712, 65535)),
       apiPort: Math.max(1, Math.min(parseInt($('#ed2kApi') ? $('#ed2kApi').value : 14713) || 14713, 65535)),
-      serverMetUrl: $('#ed2kServerMet') ? $('#ed2kServerMet').value.trim() : (current.ed2k && current.ed2k.serverMetUrl || ''),
-      nodesDatUrl: $('#ed2kNodesDat') ? $('#ed2kNodesDat').value.trim() : (current.ed2k && current.ed2k.nodesDatUrl || ''),
+      serverMetUrl: current.ed2k?.serverMetUrl ?? '',
+      nodesDatUrl: current.ed2k?.nodesDatUrl ?? '',
       shareCompleted: $('#ed2kShare') ? $('#ed2kShare').checked : false,
       downloadLimitKB: Math.max(0, parseInt($('#ed2kLimit') ? $('#ed2kLimit').value : 0) || 0),
     },
