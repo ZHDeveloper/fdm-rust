@@ -874,9 +874,10 @@ fn navigate_browser_window(hwnd: HWND, page: &str) -> bool {
     thread::sleep(Duration::from_millis(180));
 
     unsafe {
+        // 打开新标签页，避免覆盖用户当前活动网页
         keybd_event(VK_CONTROL as u8, 0, 0, 0);
-        keybd_event(b'L', 0, 0, 0);
-        keybd_event(b'L', 0, KEYEVENTF_KEYUP, 0);
+        keybd_event(b'T', 0, 0, 0);
+        keybd_event(b'T', 0, KEYEVENTF_KEYUP, 0);
         keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
     }
     thread::sleep(Duration::from_millis(120));

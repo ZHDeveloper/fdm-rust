@@ -50,7 +50,7 @@ async fn bt_engine_inspects_and_adds_torrent() {
     assert_eq!(info.info_hash, info_hash);
 
     let added = engine
-        .add(1, BtSource::TorrentBytes(bytes), &download_dir, true, None)
+        .add(1, BtSource::TorrentBytes(bytes), &download_dir, true, None, None)
         .await
         .unwrap();
     assert_eq!(added.info_hash, info_hash);
@@ -132,6 +132,7 @@ async fn bt_engine_downloads_from_local_peer() {
             &download_dir,
             false,
             Some(vec![seeder_addr]),
+            None,
         )
         .await
         .unwrap();
@@ -158,4 +159,69 @@ async fn bt_engine_downloads_from_local_peer() {
     );
     engine.shutdown().await;
     seeder.stop().await;
+}
+
+
+#[tokio::test]
+async fn bt_engine_reattaches_persisted_torrent_after_restart() {
+    let td = tempfile::tempdir().unwrap();
+    let source_file = td.path().join("restart.bin");
+    std::fs::write(&source_file, vec![3u8; 128 * 1024]).unwrap();
+
+    let created = create_torrent(
+        &source_file,
+        CreateTorrentOptions {
+            piece_length: Some(32 * 1024),
+            ..Default::default()
+        },
+        &BlockingSpawner::new(1),
+    )
+    .await
+    .unwrap();
+    let bytes = created.as_bytes().unwrap().to_vec();
+    let info_hash = created.info_hash().as_string();
+
+    let settings_path = td.path().join("settings.json");
+    let download_dir = td.path().join("downloads");
+    std::fs::write(
+        &settings_path,
+        format!(
+            r#"{{"defaultDir":{},"bt":{{"enabled":true,"listenPort":0,"dhtEnabled":false,"trackerEnabled":false,"maxPeers":20,"seedAfterComplete":false,"downloadDir":{}}}}}"#,
+            serde_json::to_string(&download_dir.to_string_lossy()).unwrap(),
+            serde_json::to_string(&download_dir.to_string_lossy()).unwrap(),
+        ),
+    )
+    .unwrap();
+
+    // 第一次启动并添加任务
+    {
+        let settings = Arc::new(SettingsStore::load(td.path()).unwrap());
+        let engine = BtEngine::new(td.path(), settings).await.unwrap();
+        engine
+            .add(
+                42,
+                BtSource::TorrentBytes(bytes.clone()),
+                &download_dir,
+                true,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(engine.stats(42).await.is_some());
+        engine.shutdown().await;
+    }
+
+    // 模拟应用重启：重建 BtEngine 并使用 reattach 恢复任务关联
+    {
+        let settings = Arc::new(SettingsStore::load(td.path()).unwrap());
+        let engine = BtEngine::new(td.path(), settings).await.unwrap();
+        assert!(
+            engine.reattach(42, &info_hash).await,
+            "重启后应能通过 info_hash 重新挂载任务句柄"
+        );
+        let stats = engine.stats(42).await.expect("重新挂载后必须能获取状态");
+        assert_eq!(stats.total_bytes, 128 * 1024);
+        engine.shutdown().await;
+    }
 }

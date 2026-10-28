@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use fdm_core::{paths, SettingsStore, TorrentFileInfo};
 use librqbit::dht::DhtPersistenceConfig;
@@ -15,6 +15,7 @@ use librqbit::{
     SessionOptions, SessionPersistenceConfig, TorrentStatsState,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(90);
@@ -248,6 +249,7 @@ impl BtEngine {
         dir: &Path,
         paused: bool,
         initial_peers: Option<Vec<SocketAddr>>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<BtTorrentInfo> {
         paths::ensure_dir(dir)?;
         let add = match source {
@@ -277,10 +279,23 @@ impl BtEngine {
             AddTorrentResponse::ListOnly(_) => return Err(anyhow!("种子未进入下载队列")),
         };
 
-        tokio::time::timeout(METADATA_TIMEOUT, handle.wait_until_initialized())
-            .await
-            .map_err(|_| anyhow!("获取种子元数据超时（90 秒）"))?
-            .context("初始化 BT 任务失败")?;
+        let wait_init = async {
+            tokio::time::timeout(METADATA_TIMEOUT, handle.wait_until_initialized())
+                .await
+                .map_err(|_| anyhow!("获取种子元数据超时（90 秒）"))?
+                .context("初始化 BT 任务失败")
+        };
+        if let Some(token) = cancel {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    let _ = self.session.delete(handle.info_hash().into(), false).await;
+                    bail!("任务已取消");
+                }
+                res = wait_init => res?,
+            }
+        } else {
+            wait_init.await?;
+        }
 
         let info = handle
             .with_metadata(|meta| {

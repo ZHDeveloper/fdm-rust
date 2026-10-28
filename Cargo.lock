@@ -1607,6 +1607,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+ "winreg 0.52.0",
 ]
 
 [[package]]

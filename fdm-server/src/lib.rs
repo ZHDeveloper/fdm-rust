@@ -1032,38 +1032,38 @@ fn format_speed(speed_bytes: f64) -> String {
     }
 }
 
-/// 读取操作系统代理（Windows 注册表 / macOS scutil），用于避免接管时绕过用户代理。
+/// 读取操作系统代理（Windows 注册表 / macOS scutil），带 5 秒缓存避免高频轮询开销。
 fn detect_system_proxy() -> Option<String> {
-    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(detect_system_proxy_inner).clone()
+    static CACHE: std::sync::Mutex<Option<(Instant, Option<String>)>> = std::sync::Mutex::new(None);
+    if let Ok(mut guard) = CACHE.lock() {
+        if let Some((at, val)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_secs(5) {
+                return val.clone();
+            }
+        }
+        let fresh = detect_system_proxy_inner();
+        *guard = Some((Instant::now(), fresh.clone()));
+        fresh
+    } else {
+        detect_system_proxy_inner()
+    }
 }
 
 #[cfg(windows)]
 fn detect_system_proxy_inner() -> Option<String> {
-    let output = std::process::Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-        ])
-        .output()
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
         .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut enabled = false;
-    let mut server = None;
-    for line in text.lines() {
-        if line.contains("ProxyEnable") && line.contains("0x1") {
-            enabled = true;
-        }
-        if line.contains("ProxyServer") {
-            if let Some(idx) = line.find("REG_SZ") {
-                server = Some(line[idx + "REG_SZ".len()..].trim().to_string());
-            }
-        }
-    }
-    if !enabled {
+    let enabled: u32 = key.get_value("ProxyEnable").unwrap_or(0);
+    if enabled == 0 {
         return None;
     }
-    normalize_proxy_server(&server?)
+    let server: String = key.get_value("ProxyServer").ok()?;
+    normalize_proxy_server(&server)
 }
 
 #[cfg(target_os = "macos")]

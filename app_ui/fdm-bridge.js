@@ -211,104 +211,7 @@
     }
   }
 
-  // ---- 重复下载 / 文件名冲突对话框（纯前端，所有窗口共用） ----
-  function ensureConflictStyles() {
-    if (document.getElementById('fdmConflictStyles')) return;
-    const style = document.createElement('style');
-    style.id = 'fdmConflictStyles';
-    style.textContent = `
-      .fdm-conflict-mask{position:fixed;inset:0;background:rgba(0,0,0,.28);z-index:2147483000;display:flex;align-items:center;justify-content:center;font-family:"Segoe UI","Microsoft YaHei",Tahoma,sans-serif}
-      .fdm-conflict{width:380px;max-width:92vw;background:#f0f0f0;border:.5px solid rgba(0,0,0,.2);border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:11px;color:#1a1a1a}
-      .fdm-conflict .h{padding:10px 14px 4px;font-size:12px;font-weight:600}
-      .fdm-conflict .b{padding:4px 14px 8px;line-height:1.55}
-      .fdm-conflict .sub{color:#555;margin:2px 0 8px;word-break:break-all}
-      .fdm-conflict label{display:flex;gap:7px;align-items:center;margin:6px 0;line-height:1.5;cursor:pointer}
-      .fdm-conflict input[type=radio],.fdm-conflict input[type=checkbox]{margin:0;accent-color:#0078d7;flex:0 0 auto;position:relative;top:1px}
-      .fdm-conflict .chk{margin-top:8px;color:#444}
-      .fdm-conflict .f{display:flex;justify-content:flex-end;gap:8px;padding:8px 14px;border-top:.5px solid rgba(0,0,0,.1)}
-      .fdm-conflict button{min-width:74px;min-height:24px;padding:3px 11px;border:.5px solid rgba(0,0,0,.2);border-radius:5px;background:#fff;font:inherit;cursor:pointer}
-      .fdm-conflict button:hover{background:#e5f1fb;border-color:#0078d7}
-    `;
-    document.head.appendChild(style);
-  }
 
-  function openConflictDialog({ title, summary, options, defaultIndex, remember }) {
-    ensureConflictStyles();
-    return new Promise((resolve) => {
-      const mask = document.createElement('div');
-      mask.className = 'fdm-conflict-mask';
-      const box = document.createElement('div');
-      box.className = 'fdm-conflict';
-      const name = 'fdm-dup-' + Math.random().toString(36).slice(2);
-      box.innerHTML = `<div class="h"></div><div class="b"><div class="sub"></div><div class="opts"></div>${remember ? '<label class="chk"><input type="checkbox" data-remember><span>记住我的选择，之后按同样方式处理</span></label>' : ''}</div><div class="f"><button data-cancel>取消</button><button class="pri" data-ok>确定</button></div>`;
-      box.querySelector('.h').textContent = title || '重复的下载链接';
-      box.querySelector('.sub').textContent = summary || '';
-      const optsEl = box.querySelector('.opts');
-      options.forEach((opt, idx) => {
-        const label = document.createElement('label');
-        const radio = document.createElement('input');
-        radio.type = 'radio';
-        radio.name = name;
-        radio.value = String(opt.value);
-        radio.checked = idx === defaultIndex;
-        const span = document.createElement('span');
-        span.textContent = opt.label;
-        label.appendChild(radio);
-        label.appendChild(span);
-        optsEl.appendChild(label);
-      });
-      const finish = (value) => { try { mask.remove(); } catch (_) {} resolve(value); };
-      const ok = () => {
-        const picked = box.querySelector(`input[name="${name}"]:checked`);
-        if (!picked) return;
-        const rem = box.querySelector('[data-remember]');
-        finish({ value: Number(picked.value), remember: !!(rem && rem.checked) });
-      };
-      box.querySelector('[data-ok]').onclick = ok;
-      box.querySelector('[data-cancel]').onclick = () => finish(null);
-      mask.addEventListener('mousedown', (e) => { if (e.target === mask) finish(null); });
-      mask.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') { e.preventDefault(); finish(null); }
-        if (e.key === 'Enter') { e.preventDefault(); ok(); }
-      });
-      mask.tabIndex = -1;
-      mask.appendChild(box);
-      document.body.appendChild(mask);
-      mask.focus();
-    });
-  }
-
-  async function showDuplicateDialog(data) {
-    const dup = data.duplicate || {};
-    const actions = Array.isArray(data.actions) && data.actions.length ? data.actions : [
-      { value: 1, label: '为重复的下载链接添加带序号的文件名' },
-      { value: 2, label: '添加重复的下载链接，并覆盖已存在的文件' },
-      { value: 3, label: '若原任务已完成，按完成设置处理；否则继续下载' },
-    ];
-    const def = Number(data.defaultAction || 3);
-    const defaultIndex = Math.max(0, actions.findIndex((a) => Number(a.value) === def));
-    const summary = `该文件在您的下载列表中已存在：${dup.filename || ''}`;
-    const picked = await openConflictDialog({
-      title: '重复的下载链接', summary, options: actions, defaultIndex, remember: true,
-    });
-    if (!picked) return null;
-    return { action: picked.value, remember: picked.remember };
-  }
-
-  async function showNameConflictDialog(data) {
-    const summary = data.reason === 'list'
-      ? `文件名“${data.filename || ''}”已在下载列表中，请选择处理方式。`
-      : `文件已存在于磁盘：${data.path || data.filename || ''}`;
-    const options = [
-      { value: 1, label: `使用带序号的文件名：${data.suggested || '自动生成'}` },
-      { value: 2, label: '覆盖同名文件' },
-    ];
-    const picked = await openConflictDialog({
-      title: '文件名已存在', summary, options, defaultIndex: 0, remember: true,
-    });
-    if (!picked) return null;
-    return { fileAction: picked.value, rememberFileConflict: picked.remember };
-  }
 
   // 挂载核心 API
   window.api = {
@@ -365,21 +268,22 @@
             break;
           } catch (e) {
             if (e && e.status === 409 && e.data && e.data.code === 'duplicate') {
-              // 优先使用独立原生窗口；打不开时退回页面内弹窗。
               const opened = await window.api.openDuplicateRequest(payload, e.data);
               if (opened) return 'delegated';
-              const choice = await showDuplicateDialog(e.data);
-              if (!choice) return null;
-              payload = { ...payload, duplicateAction: choice.action, rememberDuplicate: choice.remember };
-              continue;
+              await showNativeMessage('该下载链接已在任务列表中存在', 'FDM', 'warning');
+              return null;
             }
             if (e && e.status === 409 && e.data && e.data.code === 'name_conflict') {
               const opened = await window.api.openPromptRequest('name_conflict', payload, e.data);
               if (opened) return 'delegated';
-              const choice = await showNameConflictDialog(e.data);
-              if (!choice) return null;
-              payload = { ...payload, fileAction: choice.fileAction, rememberFileConflict: choice.rememberFileConflict };
-              continue;
+              await showNativeMessage(
+                e.data.reason === 'list'
+                  ? `文件名“${e.data.filename || ''}”已在下载列表中`
+                  : `磁盘中已存在同名文件：${e.data.path || e.data.filename || ''}`,
+                'FDM',
+                'warning'
+              );
+              return null;
             }
             throw e;
           }

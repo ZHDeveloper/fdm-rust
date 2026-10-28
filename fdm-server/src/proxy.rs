@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -20,43 +19,66 @@ const MAX_HEAD: usize = 128 * 1024;
 const MAX_REQUEST_BODY: usize = 128 * 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 static PROXY_READY: AtomicBool = AtomicBool::new(false);
-static CLIENT: OnceLock<Client> = OnceLock::new();
+static PROXY_CLIENT_CACHE: std::sync::RwLock<Option<(String, Client)>> =
+    std::sync::RwLock::new(None);
 
 pub fn is_ready() -> bool {
     PROXY_READY.load(Ordering::Relaxed)
 }
 
-fn client(settings: &fdm_core::Settings) -> &'static Client {
-    CLIENT.get_or_init(|| {
-        let mut builder = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(300))
-            .pool_idle_timeout(Duration::from_secs(60))
-            .pool_max_idle_per_host(32)
-            .tcp_nodelay(true)
-            .http1_only();
-        if settings.proxy_enabled && !settings.proxy_host.trim().is_empty() {
-            let scheme = match settings.proxy_type.trim() {
-                "" => "http",
-                other => other,
-            };
-            let host = settings.proxy_host.trim();
-            let port = settings.proxy_port.trim();
-            let addr = if port.is_empty() {
-                format!("{scheme}://{host}")
-            } else {
-                format!("{scheme}://{host}:{port}")
-            };
-            if let Ok(mut proxy) = reqwest::Proxy::all(addr) {
-                if !settings.proxy_user.is_empty() {
-                    proxy = proxy.basic_auth(&settings.proxy_user, &settings.proxy_pass);
-                }
-                builder = builder.proxy(proxy);
+fn client_key(settings: &fdm_core::Settings) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        settings.proxy_enabled,
+        settings.proxy_type,
+        settings.proxy_host,
+        settings.proxy_port,
+        settings.proxy_user,
+        settings.proxy_pass
+    )
+}
+
+fn client(settings: &fdm_core::Settings) -> Client {
+    let key = client_key(settings);
+    if let Ok(guard) = PROXY_CLIENT_CACHE.read() {
+        if let Some((cached_key, cached_client)) = guard.as_ref() {
+            if cached_key == &key {
+                return cached_client.clone();
             }
         }
-        builder.build().expect("构建本地代理 HTTP 客户端失败")
-    })
+    }
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(300))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(32)
+        .tcp_nodelay(true)
+        .http1_only();
+    if settings.proxy_enabled && !settings.proxy_host.trim().is_empty() {
+        let scheme = match settings.proxy_type.trim() {
+            "" => "http",
+            other => other,
+        };
+        let host = settings.proxy_host.trim();
+        let port = settings.proxy_port.trim();
+        let addr = if port.is_empty() {
+            format!("{scheme}://{host}")
+        } else {
+            format!("{scheme}://{host}:{port}")
+        };
+        if let Ok(mut proxy) = reqwest::Proxy::all(addr) {
+            if !settings.proxy_user.is_empty() {
+                proxy = proxy.basic_auth(&settings.proxy_user, &settings.proxy_pass);
+            }
+            builder = builder.proxy(proxy);
+        }
+    }
+    let new_client = builder.build().expect("构建本地代理 HTTP 客户端失败");
+    if let Ok(mut guard) = PROXY_CLIENT_CACHE.write() {
+        *guard = Some((key, new_client.clone()));
+    }
+    new_client
 }
 
 /// 用户态 HTTP 数据面：浏览器把原始请求发给这里，代理透明转发并观察响应。
@@ -69,7 +91,14 @@ pub async fn run(state: ServerState) -> Result<()> {
         .with_context(|| format!("绑定本地代理 {PROXY_ADDR} 失败"))?;
     PROXY_READY.store(true, Ordering::Relaxed);
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(error = %err, "本地代理 accept 失败，稍后重试");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle(socket, state).await {
@@ -382,23 +411,29 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<(Vec<u8>, Vec<u8>
 async fn read_chunked_body(socket: &mut TcpStream, mut data: Vec<u8>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
-        while data.len() < 2 {
+        let line_end = loop {
+            if let Some(pos) = data.windows(2).position(|w| w == b"\r\n") {
+                break pos;
+            }
+            if data.len() > 1024 {
+                return Err(anyhow!("chunked 长度行非法"));
+            }
             let mut buf = [0u8; 8192];
             let n = socket.read(&mut buf).await?;
             if n == 0 {
                 return Err(anyhow!("chunked 请求体提前结束"));
             }
             data.extend_from_slice(&buf[..n]);
-        }
-        let line_end = data
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or_else(|| anyhow!("chunked 长度行非法"))?;
+        };
         let line = String::from_utf8_lossy(&data[..line_end]);
-        let size = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16)?;
+        let size = usize::from_str_radix(line.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| anyhow!("chunked 长度行非法"))?;
         data.drain(..line_end + 2);
         if size == 0 {
             return Ok(out);
+        }
+        if out.len().saturating_add(size) > MAX_REQUEST_BODY {
+            return Err(anyhow!("请求体过大"));
         }
         while data.len() < size + 2 {
             let mut buf = [0u8; 8192];
@@ -407,6 +442,9 @@ async fn read_chunked_body(socket: &mut TcpStream, mut data: Vec<u8>) -> Result<
                 return Err(anyhow!("chunked 请求体提前结束"));
             }
             data.extend_from_slice(&buf[..n]);
+        }
+        if data.get(size..size + 2) != Some(b"\r\n") {
+            return Err(anyhow!("chunked 分块结尾缺少 CRLF"));
         }
         out.extend_from_slice(&data[..size]);
         data.drain(..size + 2);
@@ -499,5 +537,23 @@ mod tests {
         let mut html = HeaderMap::new();
         html.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
         assert!(!should_capture(200, &html, &Method::GET));
+    }
+
+    #[tokio::test]
+    async fn parses_fragmented_chunked_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let writer = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"5").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stream.write_all(b"\r\nhello\r\n").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let body = read_chunked_body(&mut socket, Vec::new()).await.unwrap();
+        assert_eq!(body, b"hello");
+        writer.await.unwrap();
     }
 }

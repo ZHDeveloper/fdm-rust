@@ -611,11 +611,11 @@ impl TaskManager {
         self.emit_entry(&entry).await;
     }
 
-    async fn active_count(&self) -> usize {
+    async fn active_http_count(&self) -> usize {
         let mut count = 0;
         for entry in self.entries() {
             let state = entry.state.lock().await;
-            if is_active_status(&state.status) {
+            if state.kind == "http" && is_active_status(&state.status) {
                 count += 1;
             }
         }
@@ -869,9 +869,11 @@ impl TaskManager {
             state.status = STATUS_PAUSED.to_string();
             drop(state);
             self.emit_entry(&entry).await;
+        } else if kind != "http" {
+            self.start_task(entry.clone()).await;
         } else {
             let max_concurrent = self.settings.get().max_concurrent.max(1) as usize;
-            if self.active_count().await < max_concurrent {
+            if self.active_http_count().await < max_concurrent {
                 self.start_task(entry.clone()).await;
             } else {
                 let mut state = entry.state.lock().await;
@@ -1389,7 +1391,7 @@ impl TaskManager {
             return true;
         }
         let max_concurrent = self.settings.get().max_concurrent.max(1) as usize;
-        if self.active_count().await < max_concurrent {
+        if self.active_http_count().await < max_concurrent {
             self.start_task(entry).await;
         } else {
             {
@@ -1590,14 +1592,14 @@ impl TaskManager {
             self.start_task(entry).await;
         }
         let max_concurrent = self.settings.get().max_concurrent.max(1) as usize;
-        let mut active = self.active_count().await;
+        let mut active = self.active_http_count().await;
         if active >= max_concurrent {
             return;
         }
         let mut queued = Vec::new();
         for entry in self.entries() {
             let state = entry.state.lock().await;
-            if state.status == STATUS_QUEUED && !entry.is_running() {
+            if state.status == STATUS_QUEUED && !entry.is_running() && state.kind == "http" {
                 queued.push(entry.clone());
             }
         }
@@ -1677,7 +1679,7 @@ impl TaskManager {
             } else {
                 bail!("BT 任务缺少磁力链接或种子文件");
             };
-            let info = engine.add(id, source, &dir, false, None).await?;
+            let info = engine.add(id, source, &dir, false, None, Some(token)).await?;
             let mut state = entry.state.lock().await;
             state.info_hash = Some(info.info_hash.clone());
             // 种子名来自远端元数据，统一清洗后再用于展示与路径。
@@ -3513,5 +3515,52 @@ mod tests {
             }))
             .await;
         assert!(result.is_err(), "相对下载目录必须被拒绝");
+    }
+
+    #[tokio::test]
+    async fn http_tasks_not_starved_by_active_p2p_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = test_manager(
+            dir.path(),
+            serde_json::json!({
+                "defaultDir": dir.path().to_string_lossy(),
+                "maxConcurrent": 1
+            }),
+        );
+        let mut bt_data = TaskData::new(
+            1,
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".to_string(),
+            dir.path(),
+            Some("movie.torrent".to_string()),
+            1,
+            0,
+            false,
+            std::collections::HashMap::new(),
+        );
+        bt_data.kind = "bt".to_string();
+        bt_data.status = STATUS_DOWNLOADING.to_string();
+        let bt_entry = Arc::new(TaskEntry::new(bt_data));
+        m.tasks.write().unwrap().insert(1, bt_entry);
+
+        let mut http_data = TaskData::new(
+            2,
+            "https://example.com/file.zip".to_string(),
+            dir.path(),
+            Some("file.zip".to_string()),
+            1,
+            0,
+            false,
+            std::collections::HashMap::new(),
+        );
+        http_data.kind = "http".to_string();
+        http_data.status = STATUS_QUEUED.to_string();
+        let http_entry = Arc::new(TaskEntry::new(http_data));
+        m.tasks.write().unwrap().insert(2, http_entry.clone());
+
+        assert_eq!(m.active_http_count().await, 0);
+        m.schedule_once().await;
+
+        let status = http_entry.state.lock().await.status.clone();
+        assert_ne!(status, STATUS_QUEUED, "HTTP 任务不应被 BT 活跃任务阻塞");
     }
 }
