@@ -419,7 +419,21 @@ impl DesktopHooks for TauriHooks {
                 status.notes = update_notes;
                 publish_update_status(&manager, &status_slot, status);
 
-                #[cfg(not(windows))]
+                let _ = manager.save_tasks().await;
+                manager.shutdown_engines().await;
+
+                #[cfg(target_os = "macos")]
+                {
+                    if let Err(err) = restart_macos(&app) {
+                        tracing::error!(error = %err, "准备 macOS 重启脚本失败，回退到 app.restart()");
+                        app.restart();
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        std::process::exit(0);
+                    }
+                }
+
+                #[cfg(all(not(windows), not(target_os = "macos")))]
                 app.restart();
 
                 #[cfg(windows)]
@@ -558,6 +572,60 @@ fn updater_proxy(settings: &Settings) -> Option<Url> {
         )
     };
     Url::parse(&format!("{scheme}://{auth}{authority}")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn restart_macos(app: &AppHandle) -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    let bundle_path = current_exe
+        .ancestors()
+        .find(|p| p.extension().and_then(|ext| ext.to_str()) == Some("app"))
+        .map(|p| p.to_path_buf());
+
+    let pid = std::process::id();
+    let identifier = app.config().identifier.replace(['.', '-'].as_ref(), "_");
+    let socket_path = format!("/tmp/{}_si.sock", identifier);
+
+    let (target_path, is_bundle) = if let Some(bundle) = bundle_path {
+        (bundle, "1")
+    } else {
+        (current_exe, "0")
+    };
+
+    // shortcut: 最多等待5秒旧进程消亡并清理单例socket，避免新实例被杀或端口冲突
+    let script = r#"
+        pid="$1"
+        sock="$2"
+        target="$3"
+        is_bundle="$4"
+        count=0
+        while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 50 ]; do
+            sleep 0.1
+            count=$((count + 1))
+        done
+        rm -f "$sock" 2>/dev/null
+        if [ "$is_bundle" = "1" ]; then
+            /usr/bin/open -n "$target"
+        else
+            "$target"
+        fi
+    "#;
+
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .arg("_")
+        .arg(pid.to_string())
+        .arg(socket_path)
+        .arg(target_path)
+        .arg(is_bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    Ok(())
 }
 
 fn update_endpoints(settings: &Settings) -> Option<Vec<Url>> {
