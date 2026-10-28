@@ -54,3 +54,6 @@ $RECYCLE.BIN/
 
 # 打包时由 scripts/package-amule.ps1 生成
 /src-tauri/resources/amule/
+
+# 本地 Cargo 镜像配置
+.cargo/

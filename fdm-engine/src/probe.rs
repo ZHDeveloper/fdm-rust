@@ -51,6 +51,8 @@ pub fn build_client(settings: &Settings) -> anyhow::Result<Client> {
             proxy = proxy.basic_auth(&settings.proxy_user, &settings.proxy_pass);
         }
         builder = builder.proxy(proxy);
+    } else if !settings.proxy_enabled {
+        builder = builder.no_proxy();
     }
     Ok(builder.build()?)
 }
