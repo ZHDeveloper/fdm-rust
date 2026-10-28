@@ -468,6 +468,149 @@ impl TaskManager {
         let entry = self.tasks.read().ok()?.get(&id).cloned()?;
         Some(entry.snapshot().await)
     }
+    /// 本地代理开始把响应体直接写入 `.fdmpart`：先建任务，供 UI 显示进度。
+    pub async fn begin_capture(
+        self: &Arc<Self>,
+        url: &str,
+        filename: &str,
+        total: Option<u64>,
+    ) -> Result<(i64, PathBuf)> {
+        let settings = self.settings.get();
+        let dir = settings.default_dir.clone();
+        fdm_core::paths::ensure_dir(Path::new(&dir))?;
+        let _guard = self.add_lock.lock().await;
+        let base = fdm_core::sanitize_filename(filename);
+        let name = self.free_filename(&dir, &base).await;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut data = TaskData::new(
+            id,
+            url.to_string(),
+            &dir,
+            Some(name),
+            1,
+            settings.max_rate_kb.saturating_mul(1024),
+            false,
+            HashMap::new(),
+        );
+        data.status = STATUS_DOWNLOADING.to_string();
+        data.kind = "capture".to_string();
+        data.total = total;
+        data.connections = 1;
+        let part_path = data.part_path.clone();
+        let entry = Arc::new(TaskEntry::new(data));
+        self.tasks
+            .write()
+            .map_err(|_| anyhow!("任务表锁损坏"))?
+            .insert(id, entry.clone());
+        self.save_tasks().await?;
+        self.emit_entry(&entry).await;
+        Ok((id, part_path))
+    }
+
+    /// 代理写入过程中刷新已下载字节；事件由调用方节流。
+    pub async fn update_capture(
+        &self,
+        id: i64,
+        downloaded: u64,
+        total: Option<u64>,
+        speed: f64,
+    ) -> Result<()> {
+        let Some(entry) = self.tasks.read().ok().and_then(|m| m.get(&id).cloned()) else {
+            return Ok(());
+        };
+        {
+            let mut state = entry.state.lock().await;
+            state.downloaded = downloaded;
+            state.speed = speed;
+            if total.is_some() {
+                state.total = total;
+            }
+            state.refresh_progress();
+        }
+        self.emit_entry(&entry).await;
+        Ok(())
+    }
+
+    /// 代理捕获任务被暂停或删除时，数据面要立即停止读取上游。
+    pub async fn capture_should_stop(&self, id: i64) -> bool {
+        let Some(entry) = self.tasks.read().ok().and_then(|m| m.get(&id).cloned()) else {
+            return true;
+        };
+        if entry.is_cancelled() {
+            return true;
+        }
+        let paused = {
+            let state = entry.state.lock().await;
+            state.status == STATUS_PAUSED
+        };
+        paused
+    }
+
+    /// 任务是否仍存在（用于区分暂停与删除，删除后由数据面清理半成品）。
+    pub async fn capture_exists(&self, id: i64) -> bool {
+        self.tasks
+            .read()
+            .map(|m| m.contains_key(&id))
+            .unwrap_or(false)
+    }
+
+    /// 代理写完响应体：`.fdmpart` 落成正式文件并置为完成。
+    pub async fn finish_capture(self: &Arc<Self>, id: i64, bytes: u64) -> Result<TaskSnapshot> {
+        let Some(entry) = self.tasks.read().ok().and_then(|m| m.get(&id).cloned()) else {
+            bail!("任务不存在: {id}");
+        };
+        let (part_path, filepath) = {
+            let state = entry.state.lock().await;
+            (state.part_path.clone(), state.filepath.clone())
+        };
+        if part_path.exists() {
+            if let Err(err) = std::fs::rename(&part_path, &filepath) {
+                let message = format!(
+                    "无法重命名 {} -> {}: {err}",
+                    part_path.display(),
+                    filepath.display()
+                );
+                {
+                    let mut state = entry.state.lock().await;
+                    state.status = STATUS_ERROR.to_string();
+                    state.error = Some(message.clone());
+                    state.speed = 0.0;
+                }
+                let _ = self.save_tasks().await;
+                self.emit_entry(&entry).await;
+                return Err(anyhow!(message));
+            }
+        }
+        {
+            let mut state = entry.state.lock().await;
+            state.total = Some(bytes);
+            state.downloaded = bytes;
+            state.progress = 1.0;
+            state.speed = 0.0;
+            state.status = STATUS_DONE.to_string();
+            state.error = None;
+        }
+        self.save_tasks().await?;
+        self.emit_entry(&entry).await;
+        Ok(entry.snapshot().await)
+    }
+
+    /// 代理中途失败：保留错误任务，删除半成品。
+    pub async fn fail_capture(&self, id: i64, message: &str) {
+        let Some(entry) = self.tasks.read().ok().and_then(|m| m.get(&id).cloned()) else {
+            return;
+        };
+        let part_path = {
+            let mut state = entry.state.lock().await;
+            state.status = STATUS_ERROR.to_string();
+            state.error = Some(message.to_string());
+            state.speed = 0.0;
+            state.part_path.clone()
+        };
+        let _ = std::fs::remove_file(&part_path);
+        let _ = self.save_tasks().await;
+        self.emit_entry(&entry).await;
+    }
 
     async fn active_count(&self) -> usize {
         let mut count = 0;
@@ -1100,6 +1243,16 @@ impl TaskManager {
         None
     }
 
+    /// 没有冲突时用原名，只有冲突才编号（`unique_filename` 永远带编号）。
+    async fn free_filename(&self, dir: &str, base: &str) -> String {
+        if self.find_name_conflict(dir, base).await.is_none() && !Path::new(dir).join(base).exists()
+        {
+            base.to_string()
+        } else {
+            self.unique_filename(dir, base).await
+        }
+    }
+
     async fn unique_filename(&self, dir: &str, base: &str) -> String {
         for number in 1..=9999u32 {
             let candidate = fdm_core::numbered_filename(base, number);
@@ -1231,6 +1384,10 @@ impl TaskManager {
             return true;
         }
         let kind = entry.state.lock().await.kind.clone();
+        if kind == "capture" {
+            // 一次性 POST 数据面无法重放，恢复只能重新生成。
+            return false;
+        }
         if kind != "http" {
             {
                 let mut state = entry.state.lock().await;
@@ -2979,6 +3136,29 @@ mod tests {
         assert_eq!(response_total(200, &headers), Some(100));
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
         assert_eq!(response_total(200, &headers), None);
+    }
+
+    #[tokio::test]
+    async fn capture_writes_part_then_finishes_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = test_manager(
+            dir.path(),
+            serde_json::json!({"defaultDir": dir.path().to_string_lossy()}),
+        );
+        let (id, part) = m
+            .begin_capture("http://example.com/backup.tar.gz", "backup.tar.gz", Some(5))
+            .await
+            .unwrap();
+        std::fs::write(&part, b"hello").unwrap();
+        m.update_capture(id, 5, Some(5), 2048.0).await.unwrap();
+        let mid = m.get_task(id).await.unwrap();
+        assert_eq!(mid.speed, 2048);
+        let snap = m.finish_capture(id, 5).await.unwrap();
+        assert_eq!(snap.status, STATUS_DONE);
+        assert_eq!(snap.total, Some(5));
+        assert!(snap.filepath.ends_with("backup.tar.gz"));
+        assert_eq!(std::fs::read(&snap.filepath).unwrap(), b"hello");
+        assert!(!std::path::Path::new(&part).exists());
     }
 
     #[test]

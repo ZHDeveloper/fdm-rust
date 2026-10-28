@@ -46,6 +46,13 @@ impl TaskEntry {
         }
     }
 
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel
+            .lock()
+            .map(|guard| guard.is_cancelled())
+            .unwrap_or(false)
+    }
+
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }

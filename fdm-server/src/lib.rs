@@ -18,6 +18,8 @@ use fdm_core::{github_proxy_candidates, has_sensitive_headers, SettingsStore, Ta
 use fdm_engine::{AddTaskResult, TaskManager};
 use fdm_platform::PlatformService;
 use futures_util::StreamExt;
+
+pub mod proxy;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -256,6 +258,12 @@ async fn guard_local_request(req: Request, next: Next) -> Response {
 
 pub async fn serve(listener: TcpListener, state: ServerState) -> Result<()> {
     spawn_completion_worker(state.clone());
+    let proxy_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(err) = proxy::run(proxy_state).await {
+            tracing::warn!(error = %err, "本地 HTTP 代理未启动");
+        }
+    });
     let app = router(state);
     axum::serve(listener, app).await?;
     Ok(())
@@ -1027,6 +1035,87 @@ fn format_speed(speed_bytes: f64) -> String {
     }
 }
 
+/// 读取操作系统代理（Windows 注册表 / macOS scutil），用于避免接管时绕过用户代理。
+fn detect_system_proxy() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(detect_system_proxy_inner).clone()
+}
+
+#[cfg(windows)]
+fn detect_system_proxy_inner() -> Option<String> {
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut enabled = false;
+    let mut server = None;
+    for line in text.lines() {
+        if line.contains("ProxyEnable") && line.contains("0x1") {
+            enabled = true;
+        }
+        if line.contains("ProxyServer") {
+            if let Some(idx) = line.find("REG_SZ") {
+                server = Some(line[idx + "REG_SZ".len()..].trim().to_string());
+            }
+        }
+    }
+    if !enabled {
+        return None;
+    }
+    normalize_proxy_server(&server?)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_system_proxy_inner() -> Option<String> {
+    let output = std::process::Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = |key: &str| -> Option<String> {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+    };
+    if value("HTTPEnable:").as_deref() != Some("1") {
+        return None;
+    }
+    Some(format!("{}:{}", value("HTTPProxy:")?, value("HTTPPort:")?))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn detect_system_proxy_inner() -> Option<String> {
+    None
+}
+
+fn normalize_proxy_server(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if !raw.contains('=') {
+        return Some(raw.to_string());
+    }
+    let mut http = None;
+    let mut any = None;
+    for part in raw.split(';') {
+        if let Some((key, value)) = part.split_once('=') {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            any.get_or_insert_with(|| value.to_string());
+            if key.trim().eq_ignore_ascii_case("http") {
+                http = Some(value.to_string());
+            }
+        }
+    }
+    http.or(any)
+}
+
 async fn browser_status(State(state): State<ServerState>) -> Response {
     mark_browser_seen(&state);
     let tasks = state.manager.list_tasks().await;
@@ -1036,11 +1125,15 @@ async fn browser_status(State(state): State<ServerState>) -> Response {
         .collect();
     let total_speed: u64 = active.iter().map(|t| t.speed).sum();
     let settings = state.settings.get();
+    let system_proxy = detect_system_proxy();
     Json(json!({
         "online": true, "name": "FDM", "version": env!("CARGO_PKG_VERSION"),
         "active_tasks": active.len(), "total_tasks": tasks.len(),
         "total_speed": total_speed, "total_speed_str": format_speed(total_speed as f64),
-        "download_dir": settings.default_dir
+        "download_dir": settings.default_dir,
+        // 检测到系统代理时不要接管浏览器：PAC 无法表达 system 模式，会绕过用户代理。
+        "proxy_ready": crate::proxy::is_ready() && system_proxy.is_none(),
+        "system_proxy": system_proxy
     }))
     .into_response()
 }

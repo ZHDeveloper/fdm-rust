@@ -106,7 +106,7 @@ function render() {
   if (blockLabel) blockLabel.style.display = (isP2P || singleStream) ? 'none' : '';
   if (blocks) blocks.style.display = (isP2P || singleStream) ? 'none' : '';
   if (threads) threads.style.display = isP2P ? 'none' : '';
-  if (toggle) toggle.style.display = isP2P ? 'none' : '';
+  if (toggle) toggle.style.display = (isP2P || singleStream) ? 'none' : '';
   const urlEl = $('#url');
   urlEl.textContent = shortUrl(snap.url);
   urlEl.title = snap.url || '';
@@ -118,16 +118,18 @@ function render() {
   const done = snap.kind === 'hls' || snap.kind === 'dash' ? (snap.bytes || 0) : (snap.downloaded || 0);
   const pct = total ? Math.min(100, (done / total) * 100) : (snap.progress || 0) * 100;
 
-  $('#stSize').textContent = fmtSize(total);
+  $('#stSize').textContent = total ? fmtSize(total) : '未知';
   $('#stDone').textContent = fmtSize(done) + (total ? `（${pct.toFixed(2)} %）` : '');
   $('#stSpeed').textContent = snap.status === 'downloading'
     ? fmtSpeed(snap.speed || 0)
     : (snap.status === 'seeding' ? ('上传 ' + fmtSpeed(snap.uploadSpeed || 0)) : '');
   const eta = (snap.speed > 0 && total) ? (total - done) / snap.speed : null;
   $('#stEta').textContent = fmtEta(eta);
-  $('#stResume').textContent = snap.kind === 'http'
-    ? (snap.segments && snap.segments.length > 1 ? '能够' : (snap.segments && snap.segments[0] && Number.isFinite(snap.segments[0].end) ? '能够' : '未知'))
-    : (snap.kind === 'bt' || snap.kind === 'ed2k' ? '引擎托管（支持续传）' : '流式（合并后完成）');
+  $('#stResume').textContent = snap.kind === 'capture'
+    ? '不能'
+    : (snap.kind === 'http'
+      ? (snap.segments && snap.segments.length > 1 ? '能够' : (snap.segments && snap.segments[0] && Number.isFinite(snap.segments[0].end) ? '能够' : '未知'))
+      : (snap.kind === 'bt' || snap.kind === 'ed2k' ? '引擎托管（支持续传）' : '流式（合并后完成）'));
 
   $('#ovBar').style.width = pct + '%';
   $('#ovPct').textContent = pct.toFixed(0) + '%';
@@ -265,6 +267,13 @@ function renderThreads() {
 function updateButtons() {
   const b = $('#btnPauseResume');
   const c = $('#btnCancel');
+  if (snap.kind === 'capture') {
+    // 一次性 POST 捕获无法续传：按钮保留“暂停”字样，但不可点击。
+    c.textContent = snap.status === 'done' ? '关闭' : '取消';
+    b.textContent = snap.status === 'done' ? '打开' : '暂停';
+    b.disabled = snap.status !== 'done';
+    return;
+  }
   if (['downloading', 'connecting', 'waiting', 'queued', 'merging', 'seeding'].includes(snap.status)) {
     b.textContent = '暂停'; b.disabled = false;
   } else if (['paused', 'error'].includes(snap.status)) {
@@ -293,7 +302,15 @@ $('#btnPauseResume').onclick = async () => {
     closeProgressWindow();
   }
 };
-$('#btnCancel').onclick = () => closeProgressWindow();
+$('#btnCancel').onclick = async () => {
+  // 只有一次性 capture 任务需要真正取消；普通下载保持原来的“关闭窗口”语义。
+  if (snap && snap.kind === 'capture' && ['downloading', 'paused', 'error'].includes(snap.status)) {
+    try {
+      await window.api.remove(taskId, true);
+    } catch (e) {}
+  }
+  closeProgressWindow();
+};
 
 $('#toggleDetails').onclick = () => {
   document.body.classList.toggle('details-hidden');

@@ -1596,6 +1596,7 @@ dependencies = [
  "fdm-platform",
  "futures-util",
  "mime_guess",
+ "reqwest 0.12.28",
  "rust-embed",
  "serde",
  "serde_json",
@@ -1604,6 +1605,8 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tower-http",
+ "tracing",
+ "url",
 ]
 
 [[package]]

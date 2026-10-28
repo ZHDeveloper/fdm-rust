@@ -9,7 +9,111 @@
 
 const FDM_HOST = '127.0.0.1';
 const FDM_PORT = 25432;
+const PROXY_PORT = 25433;
 const STATUS_ALARM = 'fdm-status-check';
+const PROXY_STORAGE_KEY = 'fdmProxyState';
+
+function originalProxyString(original) {
+  const v = original && typeof original === 'object' ? original : null;
+  if (!v || v.mode !== 'fixed_servers' || !v.rules) return 'DIRECT';
+  const kinds = { http: 'PROXY', https: 'PROXY', socks4: 'SOCKS', socks5: 'SOCKS5' };
+  const single = v.rules.singleProxy;
+  if (single && single.host) {
+    return `${kinds[single.scheme] || 'PROXY'} ${single.host}:${single.port || 80}`;
+  }
+  return 'DIRECT';
+}
+
+function proxyPac(original) {
+  // shortcut: 只继承 fixed_servers 单一代理；system/pac 模式回落 DIRECT，需要时再解析系统代理。
+  const fallback = originalProxyString(original);
+  const httpTarget = `PROXY 127.0.0.1:${PROXY_PORT}; ${fallback}`;
+  return `var FDM_HTTP='${httpTarget}';
+var FDM_OTHER='${fallback}';
+function FindProxyForURL(url, host) {
+  if (host === '127.0.0.1' || host === 'localhost' || isPlainHostName(host)) return 'DIRECT';
+  if (url.substring(0, 5) === 'http:') return FDM_HTTP;
+  return FDM_OTHER;
+}`;
+}
+
+function proxyGet() {
+  return new Promise((resolve) => {
+    chrome.proxy.settings.get({ incognito: false }, (details) => {
+      void chrome.runtime.lastError;
+      resolve(details && details.value ? details.value : null);
+    });
+  });
+}
+
+function proxySet(value) {
+  return new Promise((resolve, reject) => {
+    chrome.proxy.settings.set({ value, scope: 'regular' }, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve();
+    });
+  });
+}
+
+function proxyClear() {
+  return new Promise((resolve, reject) => {
+    chrome.proxy.settings.clear({ scope: 'regular' }, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve();
+    });
+  });
+}
+
+let proxyBusy = false;
+
+// PAC 是全局浏览器设置：原始配置必须落盘，Service Worker 重启后才能恢复。
+async function applyProxy(enabled, systemProxy) {
+  if (!chrome.proxy || !chrome.proxy.settings || proxyBusy) return;
+  proxyBusy = true;
+  try {
+    const stored = await chrome.storage.local.get(PROXY_STORAGE_KEY);
+    const state = stored[PROXY_STORAGE_KEY] || null;
+    if (enabled) {
+      const current = await proxyGet();
+      const pacData = current && current.pacScript && current.pacScript.data;
+      if (pacData && pacData.includes(`127.0.0.1:${PROXY_PORT}`)) {
+        // 自家 PAC 已在，但 storage 可能被清空：补一条可恢复记录，否则永远清不掉。
+        if (!state) {
+          await chrome.storage.local.set({ [PROXY_STORAGE_KEY]: { active: true, original: null } });
+        }
+        return;
+      }
+      const mode = current && current.mode;
+      if (mode && mode !== 'system' && mode !== 'direct') {
+        console.warn('[FDM Ext] 浏览器已配置代理，跳过接管:', mode);
+        return;
+      }
+      if (systemProxy) {
+        console.warn('[FDM Ext] 检测到系统代理，跳过 HTTP 抓包:', systemProxy);
+        return;
+      }
+      const original = state && state.active ? state.original : current;
+      await proxySet({ mode: 'pac_script', pacScript: { data: proxyPac(original) } });
+      await chrome.storage.local.set({
+        [PROXY_STORAGE_KEY]: { active: true, original: original || null }
+      });
+      return;
+    }
+    if (!state || !state.active) return;
+    if (state.original) {
+      await proxySet(state.original);
+    } else {
+      await proxyClear();
+    }
+    await chrome.storage.local.remove(PROXY_STORAGE_KEY);
+  } catch (e) {
+    console.warn('[FDM Ext] 代理设置失败:', e);
+  } finally {
+    proxyBusy = false;
+  }
+}
 
 let isOnline = false;
 let serverInfo = null;
@@ -67,6 +171,7 @@ async function checkServerStatus() {
       const data = await resp.json();
       isOnline = true;
       serverInfo = data;
+      applyProxy(!!(data && data.proxy_ready), data && data.system_proxy);
       updateBadgeOnline(data);
       return { online: true, data };
     }
@@ -76,6 +181,7 @@ async function checkServerStatus() {
 
   isOnline = false;
   serverInfo = null;
+  applyProxy(false, null);
   updateBadgeOffline();
   return { online: false, data: null };
 }
@@ -196,6 +302,12 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
         return;
       }
 
+      // 一次性表单 POST 不能重放：交给浏览器原生下载，FDM 不接管。
+      if (isRecentFormPost(url)) {
+        doSuggest(suggest, item);
+        return;
+      }
+
       const now = Date.now();
       const isRecent = recentIntercepts.has(url) && (now - recentIntercepts.get(url) < DEBOUNCE_MS);
       const isInFlight = inFlightUrls.has(url);
@@ -274,8 +386,14 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
  */
 function doSuggest(suggest, item) {
   try {
-    suggest();
-  } catch (e) {}
+    const name = item && typeof item.filename === 'string'
+      ? item.filename.split(/[\\/]/).pop()
+      : '';
+    if (name) suggest({ filename: name, conflictAction: 'uniquify' });
+    else suggest();
+  } catch (e) {
+    console.warn('[FDM Ext] suggest 失败:', e);
+  }
 }
 
 /**
@@ -372,6 +490,48 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
+// ==================== 表单 POST 下载 ====================
+// HTTPS/一次性 POST 无法重放：直接交给浏览器原生下载，不再导入 FDM。
+
+const recentPostUrls = new Map(); // url -> timestamp
+const POST_TTL_MS = 10 * 60 * 1000;
+
+function trackFormPosts() {
+  const api = chrome.webRequest;
+  if (!api || !api.onBeforeRequest || typeof api.onBeforeRequest.addListener !== 'function') {
+    console.warn('[FDM Ext] webRequest 不可用，POST 表单将按普通下载处理');
+    return;
+  }
+  try {
+    api.onBeforeRequest.addListener(
+      (details) => {
+        if (details.method !== 'POST') return;
+        recentPostUrls.set(details.url, Date.now());
+        if (recentPostUrls.size > 300) {
+          const cut = Date.now() - POST_TTL_MS;
+          for (const [u, t] of recentPostUrls) {
+            if (t < cut) recentPostUrls.delete(u);
+          }
+        }
+      },
+      { urls: ['<all_urls>'] },
+      ['requestBody']
+    );
+  } catch (e) {
+    console.warn('[FDM Ext] 注册 webRequest 失败:', e);
+  }
+}
+
+function isRecentFormPost(url) {
+  const seen = recentPostUrls.get(url);
+  if (!seen) return false;
+  if (Date.now() - seen > POST_TTL_MS) {
+    recentPostUrls.delete(url);
+    return false;
+  }
+  return true;
+}
+
 // ==================== 初始化 ====================
 
 // MV3 Service Worker 空闲后会被挂起，单靠 setInterval 会停止心跳；
@@ -404,10 +564,15 @@ chrome.action.onClicked.addListener(() => {
 });
 
 (async () => {
-  // 冷启动就绪：完成本地服务状态探测
-  await ensureReady(true);
-  setupContextMenus();
-  ensureStatusAlarm();
+  // 冷启动就绪：任何一项初始化失败都不能影响状态探测与 PAC 生命周期
+  try {
+    await ensureReady(true);
+  } catch (e) {
+    console.warn('[FDM Ext] 就绪探测失败:', e);
+  }
+  try { setupContextMenus(); } catch (e) { console.warn('[FDM Ext] 菜单初始化失败:', e); }
+  try { trackFormPosts(); } catch (e) { console.warn('[FDM Ext] 表单监听初始化失败:', e); }
+  try { ensureStatusAlarm(); } catch (e) { console.warn('[FDM Ext] 定时器初始化失败:', e); }
   // Service Worker 活跃期间保持 5 秒刷新；休眠后由 alarms 兜底。
   setInterval(checkServerStatus, 5000);
 })();

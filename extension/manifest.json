@@ -1,14 +1,17 @@
 {
   "manifest_version": 3,
   "name": "FDM 浏览器下载助手",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "FDM 极速多线程下载器配套扩展，按 FDM 设置自动接管 Chrome、Edge 等 Chromium 浏览器下载并打开进度或新建任务窗口。",
   "permissions": [
     "downloads",
     "contextMenus",
     "cookies",
     "notifications",
-    "alarms"
+    "alarms",
+    "proxy",
+    "storage",
+    "webRequest"
   ],
   "host_permissions": [
     "<all_urls>"
