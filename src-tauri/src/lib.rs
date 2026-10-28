@@ -574,13 +574,17 @@ fn updater_proxy(settings: &Settings) -> Option<Url> {
     Url::parse(&format!("{scheme}://{auth}{authority}")).ok()
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn find_bundle_path(exe: &std::path::Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .find(|p| p.extension().and_then(|ext| ext.to_str()) == Some("app"))
+        .map(|p| p.to_path_buf())
+}
+
 #[cfg(target_os = "macos")]
 fn restart_macos(app: &AppHandle) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    let bundle_path = current_exe
-        .ancestors()
-        .find(|p| p.extension().and_then(|ext| ext.to_str()) == Some("app"))
-        .map(|p| p.to_path_buf());
+    let bundle_path = find_bundle_path(&current_exe);
 
     let pid = std::process::id();
     let identifier = app.config().identifier.replace(['.', '-'].as_ref(), "_");
@@ -1125,5 +1129,17 @@ mod arg_tests {
         );
 
         assert!(prefill_from_arg("--background", None).is_none());
+    }
+
+    #[test]
+    fn detects_macos_bundle_path() {
+        let app = std::path::Path::new("/Applications/FDM.app/Contents/MacOS/fdm");
+        assert_eq!(
+            find_bundle_path(app),
+            Some(PathBuf::from("/Applications/FDM.app"))
+        );
+
+        let non_bundle = std::path::Path::new("/usr/local/bin/fdm");
+        assert_eq!(find_bundle_path(non_bundle), None);
     }
 }
