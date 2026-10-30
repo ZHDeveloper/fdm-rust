@@ -352,59 +352,6 @@ function updateToolbar() {
   $('#btnFolder').disabled = !has;
 }
 
-// ---- menubar dropdowns ----
-const MENUS = {
-  task: [
-    { label: '添加新下载...', act: () => window.api.newDownload({}) },
-    { sep: true },
-    { label: '全部开始', act: () => resumeAll() },
-    { label: '全部暂停', act: () => pauseAll() },
-    { sep: true },
-    { label: '退出', act: () => window.api.quit() },
-  ],
-  file: [
-    { label: '打开下载文件夹', act: async () => window.api.openFolder(await window.api.defaultDir()) },
-    { label: '从剪贴板添加URL', act: () => addFromClipboard() },
-  ],
-  download: [
-    { label: '恢复选中', act: () => selectedId && window.api.resume(selectedId) },
-    { label: '暂停选中', act: () => selectedId && window.api.pause(selectedId) },
-    { label: '删除选中', act: () => $('#btnDelete').click() },
-    { sep: true },
-    { label: '删除全部任务', act: () => clearAllTasks() },
-    { sep: true },
-    { label: '选项/设置...', act: () => window.api.openSettings() },
-  ],
-  view: [
-    { label: '刷新', act: () => location.reload() },
-    { label: '打开进度窗口', act: () => selectedId && window.api.openProgress(selectedId) },
-  ],
-};
-const dropdown = $('#dropdown');
-function showMenu(name, x) {
-  const items = MENUS[name]; if (!items) return;
-  dropdown.innerHTML = '';
-  for (const it of items) {
-    if (it.sep) { const d = document.createElement('div'); d.className = 'sep'; dropdown.appendChild(d); continue; }
-    const d = document.createElement('div'); d.className = 'mi'; d.textContent = it.label;
-    d.onclick = () => { hideMenu(); it.act(); };
-    dropdown.appendChild(d);
-  }
-  dropdown.style.left = x + 'px';
-  dropdown.style.top = '22px';
-  dropdown.style.display = 'block';
-}
-function hideMenu() { dropdown.style.display = 'none'; }
-document.querySelectorAll('.menu').forEach((m) => {
-  m.onclick = async (e) => {
-    if (dropdown.style.display === 'block' && dropdown._for === m.dataset.menu) { hideMenu(); return; }
-    if (m.dataset.menu === 'help') return;
-    dropdown._for = m.dataset.menu;
-    showMenu(m.dataset.menu, m.getBoundingClientRect().left);
-  };
-});
-document.addEventListener('click', (e) => { if (!e.target.classList.contains('menu')) hideMenu(); });
-
 // 从剪贴板添加：剪贴板里是链接就直接带入「下载文件信息」
 async function addFromClipboard() {
   let text = '';

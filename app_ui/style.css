@@ -34,13 +34,7 @@ input, textarea { -webkit-user-select: text; user-select: text; }
 .tb-close:hover { background: #e81123; }
 .tb-close:hover svg { stroke: #fff; }
 
-/* menu bar */
-.menubar {
-  height: 22px; background: linear-gradient(#fbfbfb,#eef0f2);
-  border-bottom: 1px solid #d4d4d4; display: flex; align-items: center; padding: 0 4px;
-}
-.menu { padding: 2px 8px; border-radius: 2px; cursor: default; }
-.menu:hover { background: #d6e6fb; }
+/* dropdown menus */
 .dropdown { position: absolute; z-index: 100; background: #fff; border: 1px solid #b8bcc0;
   border-radius: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.18); padding: 4px 0; min-width: 180px; }
 .dropdown .mi { padding: 6px 22px 6px 16px; cursor: pointer; white-space: nowrap; font-size: 12px; }
