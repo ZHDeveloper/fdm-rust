@@ -1088,6 +1088,7 @@ fn detect_system_proxy_inner() -> Option<String> {
     None
 }
 
+#[cfg(windows)]
 fn normalize_proxy_server(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {

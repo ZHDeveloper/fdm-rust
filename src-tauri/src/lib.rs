@@ -422,22 +422,7 @@ impl DesktopHooks for TauriHooks {
                 let _ = manager.save_tasks().await;
                 manager.shutdown_engines().await;
 
-                #[cfg(target_os = "macos")]
-                {
-                    if let Err(err) = restart_macos(&app) {
-                        tracing::error!(error = %err, "准备 macOS 重启脚本失败，回退到 app.restart()");
-                        app.restart();
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                        std::process::exit(0);
-                    }
-                }
-
-                #[cfg(all(not(windows), not(target_os = "macos")))]
-                app.restart();
-
-                #[cfg(windows)]
-                let _ = &app;
+                finish_update_restart(&app).await;
 
                 Ok(())
             }
@@ -630,6 +615,25 @@ fn restart_macos(app: &AppHandle) -> Result<()> {
         .process_group(0)
         .spawn()?;
     Ok(())
+}
+
+/// 更新安装完成后重启应用；macOS 需要先等待 updater 安装器完全退出。
+async fn finish_update_restart(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(err) = restart_macos(app) {
+            tracing::error!(error = %err, "准备 macOS 重启脚本失败，回退到 app.restart()");
+            app.restart();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::process::exit(0);
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    app.restart();
+
+    #[cfg(windows)]
+    let _ = app;
 }
 
 fn update_endpoints(settings: &Settings) -> Option<Vec<Url>> {
@@ -1103,13 +1107,6 @@ mod arg_tests {
             "ed2k://|file|a.iso|1|8b54a3c20fae9e4b9f7e0c2c8c01b6b1|/"
         );
 
-        let absolute = prefill_from_arg(r"D:\Downloads\a.torrent", None).unwrap();
-        assert_eq!(absolute["kind"], "bt");
-        assert_eq!(absolute["torrentPath"], r"D:\Downloads\a.torrent");
-
-        let relative = prefill_from_arg("a.torrent", Some(r"D:\Downloads")).unwrap();
-        assert_eq!(relative["torrentPath"], r"D:\Downloads\a.torrent");
-
         let file_url = prefill_from_arg("file:///C:/Users/test/a.torrent", None).unwrap();
         assert_eq!(file_url["kind"], "bt");
         assert!(file_url["torrentPath"]
@@ -1129,6 +1126,17 @@ mod arg_tests {
         );
 
         assert!(prefill_from_arg("--background", None).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_windows_torrent_paths() {
+        let absolute = prefill_from_arg(r"D:\Downloads\a.torrent", None).unwrap();
+        assert_eq!(absolute["kind"], "bt");
+        assert_eq!(absolute["torrentPath"], r"D:\Downloads\a.torrent");
+
+        let relative = prefill_from_arg("a.torrent", Some(r"D:\Downloads")).unwrap();
+        assert_eq!(relative["torrentPath"], r"D:\Downloads\a.torrent");
     }
 
     #[test]
