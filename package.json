@@ -1,7 +1,7 @@
 {
   "name": "fdm-rust",
   "private": true,
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "FDM desktop downloader built with Rust and Tauri 2",
   "scripts": {
     "tauri": "tauri",
