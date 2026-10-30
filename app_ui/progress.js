@@ -316,6 +316,12 @@ $('#toggleDetails').onclick = () => {
   document.body.classList.toggle('details-hidden');
   $('#toggleDetails').textContent = document.body.classList.contains('details-hidden') ? '>> 显示细节' : '<< 隐藏细节';
   if (!document.body.classList.contains('details-hidden')) setTimeout(drawBlocks, 0);
+  if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent(`prog_${taskId}`, 540));
 };
 
 window.addEventListener('resize', () => { if (snap) drawBlocks(); });
+
+// 首次打开时按当前内容收高，使模块底部到分割线保持统一留白。
+requestAnimationFrame(() => {
+  if (window.fitPopupToContent) window.fitPopupToContent(`prog_${taskId}`, 540);
+});

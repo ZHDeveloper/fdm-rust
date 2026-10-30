@@ -56,8 +56,10 @@ async function load() {
       box.appendChild(label);
     });
     $('#ok').disabled = false;
+    if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('duplicate', 410));
   } catch (e) {
     setMsg('加载重复下载信息失败：' + (e.message || e));
+    if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('duplicate', 410));
   }
 }
 

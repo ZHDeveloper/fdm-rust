@@ -1,5 +1,6 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
+const SETTINGS_MAX_HEIGHT = 400;
 let current = {};
 
 // 设置分类标签切换
@@ -27,6 +28,7 @@ function selectTab(name) {
   if (name === 'bt' || name === 'ed2k') refreshEngineStatus();
   if (name === 'extension') refreshExtensionInfo();
   if (name === 'about') refreshAbout();
+  if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('settings', 520, { maxHeight: SETTINGS_MAX_HEIGHT }));
   return true;
 }
 
@@ -296,7 +298,13 @@ function fill(s) {
 }
 
 initTabs();
-window.api.onSettingsLoad((s) => fill(s));
+requestAnimationFrame(() => {
+  if (window.fitPopupToContent) window.fitPopupToContent('settings', 520, { maxHeight: SETTINGS_MAX_HEIGHT });
+});
+window.api.onSettingsLoad((s) => {
+  fill(s);
+  if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('settings', 520, { maxHeight: SETTINGS_MAX_HEIGHT }));
+});
 (async () => {
   const s = await window.api.getSettings();
   fill(s);

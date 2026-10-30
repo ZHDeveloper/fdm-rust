@@ -113,5 +113,16 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') window.api.closeSelf('extension_guide');
 });
 
-refreshInfo();
+function fitWindow() {
+  if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('extension_guide', 560));
+}
+
+// 首次打开时先用固定内容高度，避免窗口先按 400px 显示再收缩。
+if (window.fitPopupToContent) window.fitPopupToContent('extension_guide', 560, { initialHeight: 400 });
+// 状态检测完成后内容高度可能变化，再校正一次。
+setTimeout(fitWindow, 220);
+
+if ($('#browserSelect')) $('#browserSelect').addEventListener('change', fitWindow);
+refreshInfo().then(fitWindow);
 setInterval(refreshInfo, 2000);
+fitWindow();
