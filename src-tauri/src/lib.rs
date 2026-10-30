@@ -917,14 +917,23 @@ pub fn run() {
             let show_extension_guide =
                 !background && startup_payload.is_none() && !settings.get().extension_guide_shown;
             let main_url = Url::parse(BASE_URL)?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(main_url))
-                .title("FDM · 极速多线程下载器")
-                .inner_size(780.0, 500.0)
-                .min_inner_size(780.0, 500.0)
-                .resizable(true)
-                .center()
-                .visible(!background)
-                .build()?;
+            let mut main_window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(main_url))
+                    .title("FDM · 极速多线程下载器")
+                    .inner_size(780.0, 500.0)
+                    .min_inner_size(780.0, 500.0)
+                    .resizable(true)
+                    .center()
+                    .visible(!background);
+            #[cfg(target_os = "macos")]
+            {
+                // 原生标题栏与网页端工具栏共用一套浅灰蓝，避免出现突兀的深色分隔。
+                main_window = main_window
+                    .title_bar_style(tauri::TitleBarStyle::Transparent)
+                    .theme(Some(tauri::Theme::Light))
+                    .background_color(tauri::window::Color(236, 239, 243, 255));
+            }
+            main_window.build()?;
 
             if show_extension_guide {
                 let hooks = hooks.clone();
