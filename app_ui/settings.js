@@ -66,9 +66,10 @@ function renderUpdateStatus(status) {
       ? '正在下载 v' + (st.version || '') + '  ' + percent + '%（' + formatBytes(st.downloaded) + ' / ' + formatBytes(st.total) + '）'
       : '正在下载 v' + (st.version || '') + '  ' + formatBytes(st.downloaded);
   } else if (phase === 'installing') text = '正在安装更新，应用即将重启…';
-  else if (phase === 'error') text = '更新失败：' + (st.error || '未知错误');
+  else if (phase === 'check_error') text = '检测失败';
+  else if (phase === 'error') text = '更新失败';
   statusEl.textContent = text;
-  statusEl.style.color = phase === 'error' ? '#b42318' : '#555';
+  statusEl.style.color = phase === 'error' || phase === 'check_error' ? '#b42318' : '#555';
 
   if (barWrap && bar) {
     barWrap.style.display = showBar ? 'block' : 'none';
@@ -83,7 +84,7 @@ function renderUpdateStatus(status) {
 
   if (phase === 'available') {
     updateInfo = { version: st.version, currentVersion: st.currentVersion, notes: st.notes };
-  } else if (phase === 'idle' || phase === 'up_to_date' || phase === 'error') {
+  } else if (phase === 'idle' || phase === 'up_to_date' || phase === 'error' || phase === 'check_error') {
     updateInfo = null;
   }
   installBtn.disabled = !(phase === 'available' && st.version);
@@ -119,7 +120,7 @@ async function checkForUpdates() {
     }
   } catch (err) {
     renderUpdateStatus({
-      phase: 'error',
+      phase: 'check_error',
       currentVersion: $('#currentVersion').textContent,
       error: err && err.message ? err.message : String(err),
     });

@@ -69,7 +69,7 @@ impl TauriHooks {
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
-        status.phase = "error".to_string();
+        status.phase = "check_error".to_string();
         status.current_version = self.current_version();
         status.error = Some(message);
         self.publish_status(status);
@@ -107,6 +107,69 @@ impl TauriHooks {
         let window = builder.build()?;
         let _ = window.set_focus();
         Ok(true)
+    }
+
+    #[cfg(not(debug_assertions))]
+    async fn check_update_silent(&self) -> Result<Option<UpdateInfo>> {
+        self.run_check_update(false).await
+    }
+
+    /// `publish == false` 时只做后台检测：不显示“正在检查”，失败也不写入界面状态
+    /// （启动自动检测用，避免网络暂时不可用时留下过期的“检测失败”）。
+    async fn run_check_update(&self, publish: bool) -> Result<Option<UpdateInfo>> {
+        if self.update_busy.load(Ordering::SeqCst) {
+            bail!("更新正在下载或安装");
+        }
+        if publish {
+            let mut checking = UpdateStatus::default();
+            checking.phase = "checking".to_string();
+            checking.current_version = self.current_version();
+            self.publish_status(checking);
+        }
+
+        let updater = match build_updater(&self.app, &self.settings.get()) {
+            Ok(updater) => updater,
+            Err(err) => {
+                if publish {
+                    self.set_update_error(err.to_string());
+                }
+                return Err(err);
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let info = UpdateInfo {
+                    version: update.version.clone(),
+                    current_version: update.current_version.clone(),
+                    notes: update.body.clone(),
+                    pub_date: update.date.map(|date| date.to_string()),
+                };
+                let mut status = UpdateStatus::default();
+                status.phase = "available".to_string();
+                status.current_version = info.current_version.clone();
+                status.version = Some(info.version.clone());
+                status.notes = info.notes.clone();
+                self.publish_status(status);
+                self.manager.broadcast(
+                    "update:available",
+                    serde_json::to_value(&info).unwrap_or(Value::Null),
+                );
+                Ok(Some(info))
+            }
+            Ok(None) => {
+                let mut status = UpdateStatus::default();
+                status.phase = "up_to_date".to_string();
+                status.current_version = self.current_version();
+                self.publish_status(status);
+                Ok(None)
+            }
+            Err(err) => {
+                if publish {
+                    self.set_update_error(err.to_string());
+                }
+                Err(err.into())
+            }
+        }
     }
 }
 
@@ -251,53 +314,7 @@ impl DesktopHooks for TauriHooks {
     }
 
     async fn check_update(&self) -> Result<Option<UpdateInfo>> {
-        if self.update_busy.load(Ordering::SeqCst) {
-            bail!("更新正在下载或安装");
-        }
-        let mut checking = UpdateStatus::default();
-        checking.phase = "checking".to_string();
-        checking.current_version = self.current_version();
-        self.publish_status(checking);
-
-        let updater = match build_updater(&self.app, &self.settings.get()) {
-            Ok(updater) => updater,
-            Err(err) => {
-                self.set_update_error(err.to_string());
-                return Err(err);
-            }
-        };
-        match updater.check().await {
-            Ok(Some(update)) => {
-                let info = UpdateInfo {
-                    version: update.version.clone(),
-                    current_version: update.current_version.clone(),
-                    notes: update.body.clone(),
-                    pub_date: update.date.map(|date| date.to_string()),
-                };
-                let mut status = UpdateStatus::default();
-                status.phase = "available".to_string();
-                status.current_version = info.current_version.clone();
-                status.version = Some(info.version.clone());
-                status.notes = info.notes.clone();
-                self.publish_status(status);
-                self.manager.broadcast(
-                    "update:available",
-                    serde_json::to_value(&info).unwrap_or(Value::Null),
-                );
-                Ok(Some(info))
-            }
-            Ok(None) => {
-                let mut status = UpdateStatus::default();
-                status.phase = "up_to_date".to_string();
-                status.current_version = self.current_version();
-                self.publish_status(status);
-                Ok(None)
-            }
-            Err(err) => {
-                self.set_update_error(err.to_string());
-                Err(err.into())
-            }
-        }
+        self.run_check_update(true).await
     }
 
     async fn install_update(&self, expected_version: &str) -> Result<()> {
@@ -489,6 +506,8 @@ impl DesktopHooks for TauriHooks {
     }
 }
 
+/// 启动时的静默检测：失败时不写入界面状态（成功仍会记录 available / up_to_date）。
+/// 否则一旦网络暂时不可用，用户随后打开「关于」就会先看到一条过期的「检测失败」。
 #[cfg(not(debug_assertions))]
 fn spawn_startup_update_check(hooks: Arc<TauriHooks>, platform: Arc<dyn PlatformService>) {
     if std::env::var_os("FDM_DISABLE_UPDATE_CHECK").is_some() {
@@ -496,7 +515,7 @@ fn spawn_startup_update_check(hooks: Arc<TauriHooks>, platform: Arc<dyn Platform
     }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;
-        match hooks.check_update().await {
+        match hooks.check_update_silent().await {
             Ok(Some(info)) => {
                 let version = info.version.clone();
                 let message = format!(
