@@ -125,15 +125,25 @@ async fn probe_inner(
         .timeout(Duration::from_secs(30))
         .send()
         .await
+        .inspect_err(|err| {
+            // 探测失败会静默降级成单流下载；不留日志就分不清是服务器不支持 Range
+            // 还是网络问题，多线程丢失也无从追溯。
+            tracing::warn!(url = %url, error = %err, "下载地址 HEAD 探测失败");
+        })
     {
         edgeone = is_edgeone_waf(resp.status().as_u16(), resp.headers());
-        if resp.status().as_u16() < 400 {
+        let head_status = resp.status().as_u16();
+        if head_status < 400 {
             resolved_headers = resp.headers().clone();
             if !is_html_error(url, &resolved_headers) {
                 let accept_ranges = header_text(&resolved_headers, ACCEPT_RANGES);
                 supports_range = accept_ranges.to_ascii_lowercase().contains("bytes");
                 total = parse_content_length(&resolved_headers);
             }
+        } else {
+            // 状态码失败同样会让 supports_range 保持 false 而静默降级成单流，
+            // 必须留下痕迹才能事后区分“服务器不支持”与“这次请求没成功”。
+            tracing::warn!(url = %url, status = head_status, "下载地址 HEAD 探测被拒绝");
         }
     }
 
@@ -147,6 +157,9 @@ async fn probe_inner(
             .timeout(Duration::from_secs(30))
             .send()
             .await
+            .inspect_err(|err| {
+                tracing::warn!(url = %url, error = %err, "下载地址 Range 探测失败");
+            })
         {
             let status = resp.status().as_u16();
             let get_headers = resp.headers().clone();
@@ -181,13 +194,17 @@ async fn probe_inner(
                 if let (Some(head_total), Some(get_total)) = (total, get_total) {
                     if head_total != get_total {
                         // 镜像返回的 HTML 错误页：清掉大小，让 probe_candidates 继续换下一个。
+                        tracing::warn!(url = %url, "Range 探测返回的大小与 HEAD 不一致");
                         total = None;
                         supports_range = false;
                     } else {
+                        // 服务器支持 Range 却对探测请求返回 200：静默降级成单流，需留痕。
+                        tracing::warn!(url = %url, "服务器忽略了 Range 请求，改用单线程下载");
                         supports_range = false;
                         merge_content_disposition(&mut resolved_headers, &get_headers);
                     }
                 } else {
+                    tracing::warn!(url = %url, "服务器忽略了 Range 请求，改用单线程下载");
                     if get_total.is_some() {
                         total = get_total;
                     }
@@ -197,6 +214,7 @@ async fn probe_inner(
             } else if status >= 400 {
                 // 单候选时保持原有行为：不把探测失败直接放大成任务失败；
                 // 多候选时由 probe_candidates 根据 total 为空自动切换。
+                tracing::warn!(url = %url, status, "下载地址 Range 探测被拒绝");
                 total = None;
                 supports_range = false;
             }

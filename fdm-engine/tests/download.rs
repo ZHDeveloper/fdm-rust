@@ -187,6 +187,12 @@ async fn single_stream_download_without_range_support() {
     let snap = final_snap.expect("no-range download did not finish");
     assert_eq!(snap.status, "done", "error: {:?}", snap.error);
     assert_eq!(std::fs::read(&snap.filepath).unwrap(), body());
+    // 单流布局不落 .fdmcfg：否则它会成为下次启动的续传依据，一次探测失败
+    // 换来的单线程就会被无限复用（need_probe 为 false，永不重新探测）。
+    assert!(
+        !PathBuf::from(format!("{}.fdmcfg", snap.filepath)).exists(),
+        "单流任务不应固化续传布局"
+    );
     server.abort();
 }
 

@@ -152,6 +152,8 @@ pub struct CfgFile {
     pub filename: String,
     pub filepath: String,
     pub total: Option<u64>,
+    // 早期版本不写该字段：缺省为 0，由 load_cfg 视为“沿用任务自带连接数”。
+    #[serde(default)]
     pub connections: usize,
     #[serde(default)]
     pub segments: Vec<Segment>,
@@ -473,7 +475,9 @@ impl TaskData {
 
     /// 供后台阻塞线程写盘使用的 .fdmcfg 快照。
     pub fn cfg_payload(&self) -> Option<(PathBuf, Vec<u8>)> {
-        if self.kind != "http" || self.cfg_path.as_os_str().is_empty() || self.segments.is_empty() {
+        // 与 save_cfg 保持同一门槛：单分片布局不落盘，避免一次探测失败换来的
+        // 单流下载被固化成续传依据。
+        if self.kind != "http" || self.cfg_path.as_os_str().is_empty() || self.segments.len() <= 1 {
             return None;
         }
         let cfg = CfgFile {
@@ -494,7 +498,11 @@ impl TaskData {
         if self.kind != "http" {
             return;
         }
-        if self.cfg_path.as_os_str().is_empty() || self.segments.is_empty() {
+        // 单分片布局不能落盘：它会成为下次启动的续传依据（need_probe 为 false），
+        // 于是一次探测失败换来的单流下载会被无限复用，再也回不到多线程。
+        // 取舍：服务器确实不支持 Range 时，单流任务放弃 .fdmcfg 续传，每次恢复都重新探测；
+        // 换来的是不会因为一次探测失败而永久锁死在单线程。
+        if self.cfg_path.as_os_str().is_empty() || self.segments.len() <= 1 {
             return;
         }
         let cfg = CfgFile {
@@ -529,6 +537,11 @@ impl TaskData {
         self.segments = cfg.segments;
         for segment in &mut self.segments {
             segment.worker = None;
+        }
+        // 连接数必须随布局一起恢复：否则切分上限（connections * 4）会按恢复前的
+        // 默认值计算，与分片数量对不上。0 表示旧配置没有该字段，沿用任务自带的连接数。
+        if cfg.connections > 0 {
+            self.connections = cfg.connections;
         }
         self.downloaded = self.segments.iter().map(Segment::downloaded).sum();
         self.refresh_progress();
@@ -829,5 +842,77 @@ mod tests {
             canonical_url("https://example.com/a?b=1&a=2"),
             canonical_url("https://example.com/a?a=2&b=1")
         );
+    }
+
+    fn http_data(connections: usize) -> TaskData {
+        TaskData::new(
+            1,
+            "https://example.com/a.bin".to_string(),
+            std::env::temp_dir(),
+            Some("a.bin".to_string()),
+            connections,
+            0,
+            false,
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn single_segment_layout_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = http_data(8);
+        data.filepath = dir.path().join("a.bin");
+        data.setup_paths();
+        data.segments = vec![Segment::new(0, 0, 9)];
+
+        data.save_cfg();
+        assert!(
+            !data.cfg_path.exists(),
+            "单分片布局落盘后会被当成续传依据，任务将永久锁死在单线程"
+        );
+        assert!(data.cfg_payload().is_none());
+    }
+
+    #[test]
+    fn multi_segment_layout_persists_and_restores_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = http_data(8);
+        data.filepath = dir.path().join("a.bin");
+        data.setup_paths();
+        data.total = Some(100);
+        data.segments = vec![Segment::new(0, 0, 49), Segment::new(1, 50, 99)];
+
+        data.save_cfg();
+        assert!(data.cfg_path.exists(), "多分片布局必须落盘以支持断点续传");
+
+        let mut restored = http_data(2);
+        restored.filepath = dir.path().join("a.bin");
+        restored.setup_paths();
+        assert!(restored.load_cfg());
+        assert_eq!(restored.segments.len(), 2);
+        // 切分上限是 connections * 4，连接数必须随布局一起恢复。
+        assert_eq!(restored.connections, 8);
+        assert!(restored.segments.iter().all(|s| s.worker.is_none()));
+    }
+
+    #[test]
+    fn load_cfg_tolerates_config_without_connections_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(
+            format!("{}.fdmcfg", path.display()),
+            r#"{"url":"https://example.com/a.bin","filename":"a.bin","filepath":"","total":100,"segments":[{"index":0,"start":0,"end":49,"cur":0,"done":false},{"index":1,"start":50,"end":99,"cur":0,"done":false}]}"#,
+        )
+        .unwrap();
+
+        let mut data = http_data(6);
+        data.filepath = path;
+        data.setup_paths();
+        assert!(
+            data.load_cfg(),
+            "缺少 connections 字段的旧配置必须仍能恢复，否则老用户直接丢失续传"
+        );
+        assert_eq!(data.segments.len(), 2);
+        assert_eq!(data.connections, 6, "旧配置无连接数时应沿用任务自带值");
     }
 }
