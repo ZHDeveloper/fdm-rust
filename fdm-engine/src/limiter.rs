@@ -1,31 +1,23 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub struct RateLimiter {
-    max_rate: AtomicU64,
+    max_rate: u64,
     next_time: Mutex<Instant>,
 }
 
 impl RateLimiter {
     pub fn new(bytes_per_sec: u64) -> Self {
         Self {
-            max_rate: AtomicU64::new(bytes_per_sec),
+            max_rate: bytes_per_sec,
             next_time: Mutex::new(Instant::now()),
         }
     }
 
-    pub fn set_rate(&self, bytes_per_sec: u64) {
-        self.max_rate.store(bytes_per_sec, Ordering::Relaxed);
-        if let Ok(mut next) = self.next_time.try_lock() {
-            *next = Instant::now();
-        }
-    }
-
     pub fn rate(&self) -> u64 {
-        self.max_rate.load(Ordering::Relaxed)
+        self.max_rate
     }
 
     /// 返回 false 表示等待期间收到暂停/取消。

@@ -152,7 +152,7 @@ async function installUpdateNow() {
 }
 async function refreshEngineStatus() {
   let st = {};
-  try { st = await window.api.engineStatus(); } catch (e) { st = {}; }
+  try { st = await window.api.engineStatus(); } catch { st = {}; }
   const bt = st.bt || {};
   const ed = st.ed2k || {};
   const btEl = $('#btStatus');

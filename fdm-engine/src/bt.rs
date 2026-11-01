@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv6Addr, SocketAddr};
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -527,11 +526,6 @@ impl BtEngine {
         } else {
             false
         }
-    }
-
-    pub async fn set_global_rate(&self, kb_per_sec: u64) {
-        let bps = NonZeroU32::new(kb_per_sec.saturating_mul(1024).min(u32::MAX as u64) as u32);
-        self.session.ratelimits.set_download_bps(bps);
     }
 
     pub async fn shutdown(&self) {

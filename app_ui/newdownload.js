@@ -12,7 +12,7 @@ function fmtSize(b) {
 }
 function nameFromUrl(url) {
   try { const u = new URL(url); let n = decodeURIComponent(u.pathname.split('/').pop() || ''); return n.split('?')[0] || 'download'; }
-  catch (e) { return 'download'; }
+  catch { return 'download'; }
 }
 function parseHeaders(text) {
   const h = {};
@@ -39,13 +39,13 @@ function parseEd2k(url) {
   const m = /^ed2k:\/\/\|file\|([^|]*)\|(\d+)\|([0-9a-fA-F]{32})\|/i.exec((url || '').trim());
   if (!m) return null;
   let name = m[1] || '';
-  try { name = decodeURIComponent(name); } catch (e) {}
+  try { name = decodeURIComponent(name); } catch {}
   return { name, size: Number(m[2]) || 0, hash: m[3].toLowerCase() };
 }
 function parseMagnetName(url) {
   const m = /[?&]dn=([^&]*)/i.exec(url || '');
   if (!m) return '';
-  try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { return m[1]; }
+  try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch { return m[1]; }
 }
 function setKindUi(kind) {
   _kind = kind;
@@ -113,7 +113,7 @@ async function probeFileSize() {
     }
     const headers = parseHeaders($('#headers').value) || _prefill.headers || null;
     res = await window.api.probeSize(url, headers);
-  } catch (e) {
+  } catch {
     return;
   }
   if (seq !== _probeSeq) return;
@@ -240,7 +240,7 @@ function collectOpts() {
 }
 
 async function getSettings() {
-  try { return (await window.api.getSettings()) || {}; } catch (e) { return {}; }
+  try { return (await window.api.getSettings()) || {}; } catch { return {}; }
 }
 $('#start').onclick = async () => {
   const url = $('#urlBox').value.trim();

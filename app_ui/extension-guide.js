@@ -49,7 +49,7 @@ async function refreshInfo() {
       if ($('#extensionPath')) $('#extensionPath').value = info.dir;
     }
     setStatus(!!(info && info.connected));
-  } catch (e) {
+  } catch {
     setStatus(false);
   }
 }
@@ -60,13 +60,13 @@ async function copyExtensionPath() {
   try {
     await navigator.clipboard.writeText(extensionDir);
     copied = true;
-  } catch (e) {
+  } catch {
     try {
       const input = $('#extensionPath');
       input.focus();
       input.select();
       copied = document.execCommand('copy');
-    } catch (e2) {}
+    } catch {}
   }
   const btn = $('#copyPath');
   if (!btn) return;

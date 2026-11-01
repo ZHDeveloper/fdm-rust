@@ -792,16 +792,6 @@ impl Ed2kEngine {
         ok
     }
 
-    pub async fn set_global_rate(&self, kb_per_sec: u64) {
-        let _ = self
-            .request(
-                Method::PATCH,
-                "/api/v1/preferences",
-                Some(json!({"connection": {"max_download_kibibytes_per_second": kb_per_sec}})),
-            )
-            .await;
-    }
-
     pub fn download_dir(&self) -> PathBuf {
         self.download_dir
             .read()

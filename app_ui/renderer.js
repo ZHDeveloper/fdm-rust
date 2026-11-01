@@ -28,7 +28,7 @@ function initColResize() {
   const contentEl = document.querySelector('.content');
 
   let saved = {};
-  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
   let nameWidth = Number(saved.name);
   if (!Number.isFinite(nameWidth) || nameWidth <= 0) nameWidth = 0;
 
@@ -91,7 +91,7 @@ function initColResize() {
           const cur = JSON.parse(localStorage.getItem(KEY) || '{}');
           cur.name = nameWidth;
           localStorage.setItem(KEY, JSON.stringify(cur));
-        } catch (e2) {}
+        } catch {}
         syncTableWidth();
       };
       document.addEventListener('mousemove', onMove);
@@ -134,7 +134,6 @@ function buildCtxItems(ids) {
   const multi = ts.length > 1;
   const canResume = ts.some((t) => !isCaptureTask(t) && ['paused', 'error', 'queued'].includes(t.status));
   const canPause = ts.some((t) => !isCaptureTask(t) && ['downloading', 'connecting', 'waiting', 'queued', 'merging'].includes(t.status));
-  const allDone = ts.every((t) => t.status === 'done');
   const one = ts.length === 1 ? ts[0] : null;
   const n = multi ? `(${ts.length} 项)` : '';
 
@@ -372,7 +371,7 @@ function updateToolbar() {
 // 从剪贴板添加：剪贴板里是链接就直接带入「下载文件信息」
 async function addFromClipboard() {
   let text = '';
-  try { text = ((await window.api.clipboardRead()) || '').trim(); } catch (e) {}
+  try { text = ((await window.api.clipboardRead()) || '').trim(); } catch {}
   if (/^(https?:\/\/|magnet:|ed2k:\/\/)/i.test(text)) window.api.newDownload({ url: text });
   else window.api.newDownload({});
 }

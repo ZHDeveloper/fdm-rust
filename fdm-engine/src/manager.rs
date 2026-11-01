@@ -1557,8 +1557,6 @@ impl TaskManager {
         true
     }
 
-    pub async fn set_global_rate(&self, _kb_per_sec: u64) {}
-
     /// 默认下载目录变化时同步给 ED2K 引擎；BT 在下次添加任务时直接使用新目录。
     pub async fn apply_default_dir(&self, dir: &str) {
         let Some(engine) = self.ed2k_engine() else {

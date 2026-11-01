@@ -6,10 +6,7 @@ let _defaultAction = 3;
 let _kind = 'duplicate';
 
 function getParam(name) {
-  try { return new URLSearchParams(window.location.search).get(name) || ''; } catch (e) { return ''; }
-}
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  try { return new URLSearchParams(window.location.search).get(name) || ''; } catch { return ''; }
 }
 function setMsg(text) { $('#msg').textContent = text || ''; }
 
@@ -78,7 +75,7 @@ async function submit() {
       return;
     }
     if (res.id != null && res.action !== 'existing_done') {
-      try { await window.api.openProgress(res.id); } catch (e) {}
+      try { await window.api.openProgress(res.id); } catch {}
     }
     // 关闭背后的“下载文件信息”窗口，再关闭当前询问窗口
     window.api.winClose('newdownload');
@@ -91,7 +88,7 @@ async function submit() {
 }
 
 async function cancel() {
-  try { await window.api.duplicateCancel(_id); } catch (e) {}
+  try { await window.api.duplicateCancel(_id); } catch {}
   window.api.winClose('newdownload');
   window.api.closeSelf('duplicate');
 }

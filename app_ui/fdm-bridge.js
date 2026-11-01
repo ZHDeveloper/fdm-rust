@@ -120,7 +120,7 @@
         try {
           const data = JSON.parse(e.data);
           emit('settings:changed', data);
-        } catch (err) {}
+        } catch {}
       });
 
       evtSource.addEventListener('update:status', (e) => {
@@ -171,7 +171,7 @@
         scrX = window.screenX || 0;
         scrY = window.screenY || 0;
       }
-    } catch (e) { /* noop */ }
+    } catch { /* noop */ }
 
     // 2. 以「所在屏幕的可用工作区」为基准计算居中坐标
     const availW = (window.screen && window.screen.availWidth) || 1920;
@@ -206,7 +206,7 @@
       }
       if (path.includes('dialog')) return 'dialog';
       return 'main';
-    } catch (e) {
+    } catch {
       return 'main';
     }
   }
@@ -229,7 +229,7 @@
       return request('/api/system/window', 'POST', { action: 'close', target: tgt })
         .catch(() => {})
         .finally(() => {
-          try { if (window.close) window.close(); } catch (e) {}
+          try { if (window.close) window.close(); } catch {}
         });
     },
     resizeWindow: (target, width, height) => {
@@ -253,7 +253,7 @@
       try {
         const res = await request('/api/tasks');
         return Array.isArray(res) ? res : (res.tasks || []);
-      } catch (e) {
+      } catch {
         return [];
       }
     },
@@ -315,7 +315,7 @@
           ...(info || {})
         });
         return !!(res && res.opened);
-      } catch (e) {
+      } catch {
         return false;
       }
     },
@@ -330,7 +330,7 @@
       try {
         const res = await request('/api/system/choose_dir', 'POST');
         return res ? res.path : null;
-      } catch (e) {
+      } catch {
         return null;
       }
     },
@@ -339,7 +339,7 @@
       try {
         const res = await request('/api/system/choose_save_as', 'POST', { name });
         return res ? res.path : null;
-      } catch (e) {
+      } catch {
         return null;
       }
     },
@@ -348,14 +348,14 @@
       try {
         const res = await request('/api/system/default_dir');
         return res ? res.path : '';
-      } catch (e) {
+      } catch {
         return '';
       }
     },
     probeSize: async (url, headers) => {
       try {
         return await request('/api/system/probe_size', 'POST', { url, headers: headers || null });
-      } catch (e) {
+      } catch {
         return { ok: false, size: null };
       }
     },
@@ -363,7 +363,7 @@
       try {
         const res = await request('/api/system/choose_torrent_file', 'POST');
         return res ? res.path : null;
-      } catch (e) {
+      } catch {
         return null;
       }
     },
@@ -377,14 +377,14 @@
     engineStatus: async () => {
       try {
         return await request('/api/engines/status');
-      } catch (e) {
+      } catch {
         return { bt: { ready: false }, ed2k: { ready: false } };
       }
     },
     ed2kReconnect: async () => {
       try {
         return await request('/api/engines/ed2k/reconnect', 'POST');
-      } catch (e) {
+      } catch {
         return { ok: false };
       }
     },
@@ -397,7 +397,7 @@
     extensionInfo: async () => {
       try {
         return await request('/api/system/extension');
-      } catch (e) {
+      } catch {
         return { dir: '', connected: false };
       }
     },
@@ -405,7 +405,7 @@
       try {
         const res = await request('/api/system/open_extension_guide', 'POST', {});
         return !!(res && res.opened);
-      } catch (e) {
+      } catch {
         return false;
       }
     },
@@ -415,7 +415,7 @@
           browser: browser || 'chrome',
         });
         return !!(res && res.opened);
-      } catch (e) {
+      } catch {
         return false;
       }
     },
@@ -424,7 +424,7 @@
     getSettings: async () => {
       try {
         return await request('/api/settings');
-      } catch (e) {
+      } catch {
         return {};
       }
     },
@@ -434,7 +434,7 @@
       try {
         const res = await request('/api/system/choose_dir', 'POST');
         return res ? res.path : null;
-      } catch (e) {
+      } catch {
         return null;
       }
     },
@@ -496,7 +496,7 @@
       try {
         const res = await request('/api/system/clipboard_read', 'POST');
         return res ? (res.text || '') : '';
-      } catch (e) {
+      } catch {
         return '';
       }
     },
@@ -575,7 +575,7 @@
       return request('/api/system/window', 'POST', { action: 'close', target: tgt })
         .catch(() => {})
         .finally(() => {
-          try { if (window.close) window.close(); } catch (e) {}
+          try { if (window.close) window.close(); } catch {}
         });
     },
 

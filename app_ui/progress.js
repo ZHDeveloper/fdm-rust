@@ -14,7 +14,7 @@ function esc(value) {
   try {
     const m = RegExp('[?&]taskId=([^&]*)').exec(window.location.search);
     if (m) taskId = Number(m[1]);
-  } catch (e) {}
+  } catch {}
 })();
 
 // 公共关闭进度窗口函数
@@ -72,7 +72,7 @@ function shortUrl(url) {
   // ed2k:// 更不是标准 URL，会抛异常。这里单独给 P2P 链接做友好显示。
   if (raw.toLowerCase().startsWith('magnet:')) {
     let name = '';
-    try { name = new URL(raw).searchParams.get('dn') || ''; } catch (e) {}
+    try { name = new URL(raw).searchParams.get('dn') || ''; } catch {}
     const m = /urn:btih:([0-9a-z]+)/i.exec(raw);
     let s = '磁力链接 · ' + (name || (m ? m[1] : ''));
     if (!name && !m) s = raw;
@@ -89,7 +89,7 @@ function shortUrl(url) {
     let s = u.origin === 'null' ? (u.protocol + u.pathname) : (u.origin + u.pathname);
     if (s.length > 90) s = s.slice(0, 87) + '…';
     return s;
-  } catch (e) {
+  } catch {
     return raw.split('?')[0].slice(0, 90);
   }
 }
@@ -297,7 +297,7 @@ $('#btnPauseResume').onclick = async () => {
     if (window.api && window.api.openFile && p) {
       try {
         await window.api.openFile(p);
-      } catch (e) {}
+      } catch {}
     }
     closeProgressWindow();
   }
@@ -307,7 +307,7 @@ $('#btnCancel').onclick = async () => {
   if (snap && snap.kind === 'capture' && ['downloading', 'paused', 'error'].includes(snap.status)) {
     try {
       await window.api.remove(taskId, true);
-    } catch (e) {}
+    } catch {}
   }
   closeProgressWindow();
 };

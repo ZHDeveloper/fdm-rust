@@ -198,7 +198,7 @@ async function checkServerStatus() {
       broadcastBlobCaptureState();
       return { online: true, data };
     }
-  } catch (e) {
+  } catch {
     // 请求超时或服务未启动
   }
 
@@ -231,7 +231,7 @@ function updateBadgeOnline(info) {
     chrome.action.setTitle({
       title: `FDM 在线 · 活跃任务: ${activeCount} · 总速度: ${(info && info.total_speed_str) || '0 B/s'}`
     });
-  } catch (e) {
+  } catch {
     // 忽略异常
   }
 }
@@ -248,7 +248,7 @@ function updateBadgeOffline() {
     });
     chrome.action.setBadgeText({ text: '' });
     chrome.action.setTitle({ title: 'FDM 未连接（下载将由浏览器原生处理）' });
-  } catch (e) {
+  } catch {
     // 忽略异常
   }
 }
@@ -496,7 +496,7 @@ async function reloadHttpTabs() {
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({});
-  } catch (e) {
+  } catch {
     return;
   }
   for (const tab of tabs) {
@@ -515,7 +515,7 @@ async function ensureBlobScriptsInOpenTabs({ reloadStale }) {
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({});
-  } catch (e) {
+  } catch {
     return;
   }
   if (reloadStale) {
@@ -529,7 +529,7 @@ async function ensureBlobScriptsInOpenTabs({ reloadStale }) {
     let current = '';
     try {
       current = await blobBridgeVersion(tab.id);
-    } catch (e) {
+    } catch {
       current = '';
     }
     if (current === version) continue;
@@ -727,9 +727,9 @@ function abortBrowserDownload(suggest, item) {
         void chrome.runtime.lastError;
         try {
           chrome.downloads.erase({ id }, () => { void chrome.runtime.lastError; });
-        } catch (e) {}
+        } catch {}
       });
-    } catch (e) {}
+    } catch {}
   }, 0);
 }
 
