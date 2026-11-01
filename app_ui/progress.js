@@ -29,6 +29,12 @@ function closeProgressWindow() {
   }
 }
 
+function fitProgressPopup() {
+  if (window.fitPopupToContent) {
+    requestAnimationFrame(() => window.fitPopupToContent(`prog_${taskId}`, 540));
+  }
+}
+
 function fmtSize(b) {
   if (b == null) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0, n = b;
@@ -52,7 +58,11 @@ const STATUS_TEXT = {
 
 window.api.onProgressInit((d) => {
   taskId = d.taskId;
-  if (d.snap) { snap = d.snap; render(); }
+  if (d.snap) {
+    snap = d.snap;
+    render();
+    fitProgressPopup();
+  }
 });
 window.api.onTaskUpdate((s) => {
   if (taskId == null || s.id !== taskId) return;
@@ -316,12 +326,10 @@ $('#toggleDetails').onclick = () => {
   document.body.classList.toggle('details-hidden');
   $('#toggleDetails').textContent = document.body.classList.contains('details-hidden') ? '>> 显示细节' : '<< 隐藏细节';
   if (!document.body.classList.contains('details-hidden')) setTimeout(drawBlocks, 0);
-  if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent(`prog_${taskId}`, 540));
+  fitProgressPopup();
 };
 
 window.addEventListener('resize', () => { if (snap) drawBlocks(); });
 
 // 首次打开时按当前内容收高，使模块底部到分割线保持统一留白。
-requestAnimationFrame(() => {
-  if (window.fitPopupToContent) window.fitPopupToContent(`prog_${taskId}`, 540);
-});
+fitProgressPopup();
