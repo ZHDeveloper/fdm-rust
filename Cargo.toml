@@ -18,9 +18,10 @@ rust-version = "1.90"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 percent-encoding = "2"
+rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "charset", "gzip", "brotli", "deflate", "socks", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

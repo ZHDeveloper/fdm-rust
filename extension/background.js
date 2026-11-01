@@ -117,6 +117,7 @@ async function applyProxy(enabled, systemProxy) {
 
 let isOnline = false;
 let serverInfo = null;
+let lastBlobCaptureState = null;
 
 // ==================== Service Worker 冷启动就绪闸门 ====================
 // MV3 Service Worker 空闲约 30 秒即被 Chrome 挂起，唤醒时全局变量重置
@@ -156,6 +157,27 @@ function getServerBaseUrl() {
   return `http://${FDM_HOST}:${FDM_PORT}`;
 }
 
+function currentBlobCaptureState() {
+  return {
+    enabled: !!(isOnline && serverInfo && serverInfo.blob_capture === true)
+  };
+}
+
+function broadcastBlobCaptureState() {
+  const state = currentBlobCaptureState();
+  if (state.enabled === lastBlobCaptureState) return;
+  lastBlobCaptureState = state.enabled;
+  chrome.tabs.query({}, (tabs) => {
+    void chrome.runtime.lastError;
+    for (const tab of tabs || []) {
+      if (!Number.isInteger(tab.id)) continue;
+      chrome.tabs.sendMessage(tab.id, { type: 'fdm:blobState', ...state }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
+  });
+}
+
 async function checkServerStatus() {
   const url = `${getServerBaseUrl()}/api/browser/status`;
   try {
@@ -173,6 +195,7 @@ async function checkServerStatus() {
       serverInfo = data;
       applyProxy(!!(data && data.proxy_ready), data && data.system_proxy);
       updateBadgeOnline(data);
+      broadcastBlobCaptureState();
       return { online: true, data };
     }
   } catch (e) {
@@ -183,6 +206,7 @@ async function checkServerStatus() {
   serverInfo = null;
   applyProxy(false, null);
   updateBadgeOffline();
+  broadcastBlobCaptureState();
   return { online: false, data: null };
 }
 
@@ -271,6 +295,295 @@ function isHandledByFDM(result) {
   // 不再依赖具体 action 字符串，避免新增结果类型时旧逻辑把下载放回浏览器。
   return !!result && result.ok === true;
 }
+
+const BLOB_CHUNK_SIZE = 4 * 1024 * 1024;
+const BLOB_ACK_TIMEOUT_MS = 30000;
+
+async function prepareBlobCapture(message) {
+  await ensureReady();
+  if (!currentBlobCaptureState().enabled) return { ok: false };
+  const size = Number(message && message.size);
+  if (!Number.isSafeInteger(size) || size < 0) return { ok: false };
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(`${getServerBaseUrl()}/api/browser/blob/prepare`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-FDM-Extension': '1' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        filename: String((message && message.filename) || 'download.bin'),
+        size,
+        pageUrl: String((message && message.pageUrl) || '')
+      })
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) return { ok: false };
+    const result = await resp.json();
+    return result && result.ok === true && typeof result.wsUrl === 'string'
+      ? result
+      : { ok: false };
+  } catch (e) {
+    console.warn('[FDM Ext] Blob 准备失败:', e);
+    return { ok: false };
+  }
+}
+
+/**
+ * 页面内容脚本无法从公网页面连 127.0.0.1（Chrome 本地网络访问策略），
+ * 因此 WebSocket 由扩展后台建立；后台可直接 fetch 页面创建的 blob: 地址。
+ * 服务端 ready（传输真正开始）时立即 resolve，页面据此释放锚点；
+ * 开始后的失败只记录日志，不再让页面回退原生下载，避免同一文件下两次。
+ */
+function uploadBlobToFdm(wsUrl, blob) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    let offset = 0;
+    let awaitingEnd = 0;
+    let settled = false;
+    let announced = false;
+    let ready = false;
+    let ackTimer = null;
+
+    function clearTimer() {
+      if (ackTimer !== null) {
+        clearTimeout(ackTimer);
+        ackTimer = null;
+      }
+    }
+
+    function announceStarted() {
+      if (announced) return;
+      announced = true;
+      resolve({ ok: true, started: true });
+    }
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      try { ws.close(); } catch (_) {}
+      const reason = error instanceof Error ? error : new Error(String(error));
+      // 已经开始传输：失败留给 FDM 任务报错，不能在浏览器里再下一份。
+      if (announced) {
+        console.warn('[FDM Ext] Blob 传输中断:', reason);
+        return;
+      }
+      reject(reason);
+    }
+
+    function armTimer() {
+      clearTimer();
+      ackTimer = setTimeout(() => fail(new Error('FDM Blob 确认超时')), BLOB_ACK_TIMEOUT_MS);
+    }
+
+    async function sendNext() {
+      if (settled || !ready) return;
+      if (offset >= blob.size) {
+        ws.send(JSON.stringify({ type: 'end' }));
+        armTimer();
+        return;
+      }
+      awaitingEnd = Math.min(offset + BLOB_CHUNK_SIZE, blob.size);
+      const data = await blob.slice(offset, awaitingEnd).arrayBuffer();
+      if (settled) return;
+      if (ws.readyState !== WebSocket.OPEN) throw new Error('FDM Blob 连接已关闭');
+      ws.send(data);
+      armTimer();
+    }
+
+    // 没有这一步，服务端接受握手却迟迟不发 ready 时后台会永久挂住，锚点也跟着卡死。
+    ws.onopen = () => armTimer();
+
+    ws.onmessage = (event) => {
+      if (settled || typeof event.data !== 'string') return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (_) {
+        fail(new Error('FDM Blob 响应格式错误'));
+        return;
+      }
+      if (message.type === 'ready') {
+        ready = true;
+        clearTimer();
+        announceStarted();
+        sendNext().catch(fail);
+      } else if (message.type === 'ack') {
+        clearTimer();
+        if (message.received !== awaitingEnd) {
+          fail(new Error('FDM Blob 确认偏移不一致'));
+          return;
+        }
+        offset = awaitingEnd;
+        sendNext().catch(fail);
+      } else if (message.type === 'done') {
+        settled = true;
+        clearTimer();
+        try { ws.close(); } catch (_) {}
+        announceStarted();
+      } else if (message.type === 'error') {
+        fail(new Error(message.message || 'FDM Blob 下载失败'));
+      }
+    };
+    ws.onerror = () => fail(new Error('FDM Blob WebSocket 失败'));
+    ws.onclose = () => {
+      if (!settled) fail(new Error('FDM Blob 连接提前关闭'));
+    };
+  });
+}
+
+async function startBlobUpload(message) {
+  await ensureReady();
+  if (!currentBlobCaptureState().enabled) return { ok: false, started: false };
+  const blobUrl = String((message && message.blobUrl) || '');
+  if (!blobUrl.startsWith('blob:')) return { ok: false, started: false };
+
+  try {
+    const response = await fetch(blobUrl);
+    if (!response.ok) return { ok: false, started: false };
+    const blob = await response.blob();
+    const prepared = await prepareBlobCapture({
+      filename: message.filename,
+      pageUrl: message.pageUrl,
+      size: blob.size
+    });
+    if (!prepared.ok) return { ok: false, started: false };
+    // 只等到 ready 就回页面，剩下的上传在后台继续跑。
+    return await uploadBlobToFdm(prepared.wsUrl, blob);
+  } catch (e) {
+    console.warn('[FDM Ext] Blob 接管失败:', e);
+    return { ok: false, started: false, message: e && e.message ? e.message : String(e) };
+  }
+}
+
+async function injectBlobScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['blob-bridge.js']
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['blob-main.js'],
+    world: 'MAIN'
+  });
+}
+
+// 页面上的桥接版本；'legacy' 表示旧版只写了布尔标记，无法与新桥接共存。
+async function blobBridgeVersion(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const flag = window.__fdmBlobBridgeInstalled;
+      if (flag === true) return 'legacy';
+      return (flag && flag.version) || '';
+    }
+  });
+  return (results && results[0] && results[0].result) || '';
+}
+
+const BLOB_VERSION_KEY = 'fdmBlobScriptVersion';
+// onInstalled、onStartup 与底部 IIFE 三处都会调用下面的升级检查，升级瞬间
+// 它们并发启动并各自读到“旧版本”，导致每个 http 标签页被刷新两次。
+// 用一次性 Promise 闸门把“版本变更”这段串行化。
+let blobVersionUpdatePromise = null;
+
+// 扩展重载/升级后页面上会残留失效的旧内容脚本，它会拦截下载并强制回退浏览器。
+// 旧脚本无法主动移除，只能绕过缓存重新加载页面，让声明式脚本重新注入。
+async function reloadHttpTabs() {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (e) {
+    return;
+  }
+  for (const tab of tabs) {
+    if (!Number.isInteger(tab.id)) continue;
+    if (!/^https?:/.test(tab.url || '')) continue;
+    try {
+      await chrome.tabs.reload(tab.id, { bypassCache: true });
+    } catch (e) {
+      console.warn('[FDM Ext] 刷新页面失败:', e);
+    }
+  }
+}
+
+async function ensureBlobScriptsInOpenTabs({ reloadStale }) {
+  const version = chrome.runtime.getManifest().version;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (e) {
+    return;
+  }
+  if (reloadStale) {
+    await reloadHttpTabs();
+    return;
+  }
+  const stale = [];
+  for (const tab of tabs) {
+    if (!Number.isInteger(tab.id)) continue;
+    if (!/^https?:/.test(tab.url || '')) continue;
+    let current = '';
+    try {
+      current = await blobBridgeVersion(tab.id);
+    } catch (e) {
+      current = '';
+    }
+    if (current === version) continue;
+    if (current) {
+      stale.push(tab.id);
+      continue;
+    }
+    try {
+      await injectBlobScripts(tab.id);
+    } catch (e) {
+      console.warn('[FDM Ext] Blob 脚本注入失败:', e);
+    }
+  }
+  // 页面已装了其他版本的桥接：旧脚本无法移除，只能刷新让声明式脚本重新注入。
+  // 刷新依赖 host_permissions(<all_urls>)，无需 "tabs" 权限，避免安装时弹出
+  // “读取浏览记录”警告；无 url 的标签（如 about:blank）已被上面的过滤跳过。
+  // 每个标签页对每个目标版本只刷新一次：万一页面始终报旧版本（例如页面自己
+  // 占用了安装标记），也不会随 Service Worker 每 30 秒唤醒被反复重载。
+  // key 必须带版本号：sessionStorage 在 reload 后仍然存在，用固定 key 会让
+  // 下一次扩展升级时这个标签页被永久挡住，再也拿不到新脚本。
+  for (const tabId of stale) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (targetVersion) => {
+          const key = `__fdmBlobReloadOnce:${targetVersion}`;
+          if (sessionStorage.getItem(key)) return false;
+          sessionStorage.setItem(key, '1');
+          return true;
+        },
+        args: [version]
+      });
+      if (results && results[0] && results[0].result) {
+        await chrome.tabs.reload(tabId, { bypassCache: true });
+      }
+    } catch (e) {
+      console.warn('[FDM Ext] 刷新陈旧页面失败:', e);
+    }
+  }
+}
+
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || typeof message.type !== 'string') return false;
+  if (message.type === 'fdm:blobState') {
+    sendResponse(currentBlobCaptureState());
+    return false;
+  }
+  if (message.type === 'fdm:blobStart') {
+    startBlobUpload(message).then(sendResponse);
+    return true;
+  }
+  return false;
+});
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   const url = item.finalUrl || item.url || '';
@@ -422,15 +735,24 @@ function abortBrowserDownload(suggest, item) {
 
 // ==================== 右键上下文菜单 ====================
 
+function createContextMenu(item) {
+  // Service Worker 重启/扩展更新时，上一次实例的创建可能与本次 removeAll 交错，
+  // 相同菜单重复创建会设置 lastError；读取它可避免 “Unchecked runtime.lastError”。
+  chrome.contextMenus.create(item, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 function setupContextMenus() {
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
+    void chrome.runtime.lastError;
+    createContextMenu({
       id: 'fdm_download_link',
       title: '使用 FDM 下载此链接',
       contexts: ['link']
     });
 
-    chrome.contextMenus.create({
+    createContextMenu({
       id: 'fdm_download_media',
       title: '使用 FDM 下载媒体文件',
       contexts: ['image', 'video', 'audio']
@@ -544,14 +866,46 @@ function ensureStatusAlarm() {
   });
 }
 
+// 扩展被重新加载或更新后，Chrome 不会把新内容脚本注入已打开的页面；
+// 残留的旧脚本会拦截下载并强制回退浏览器。因此启动时刷新 http(s) 页面一次，
+// 让声明式脚本重新注入。用版本号记录避免同一版本反复刷新。
+async function ensureBlobScriptsAfterUpdate() {
+  const version = chrome.runtime.getManifest().version;
+  const stored = await chrome.storage.local.get(BLOB_VERSION_KEY);
+  if (stored[BLOB_VERSION_KEY] === version) {
+    await ensureBlobScriptsInOpenTabs({ reloadStale: false });
+    return;
+  }
+  if (!blobVersionUpdatePromise) {
+    blobVersionUpdatePromise = (async () => {
+      await reloadHttpTabs();
+      await chrome.storage.local.set({ [BLOB_VERSION_KEY]: version });
+    })();
+  }
+  await blobVersionUpdatePromise;
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   ensureStatusAlarm();
   void ensureReady(true);
+  void ensureBlobScriptsAfterUpdate();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureStatusAlarm();
   void ensureReady(true);
+  void ensureBlobScriptsAfterUpdate();
+});
+
+// 在 chrome://extensions 点“重新加载”或扩展自动更新都会触发 onInstalled，
+// 但页面上的旧内容脚本不会自动移除，必须刷新后由新脚本接管。
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason !== 'update' && details.reason !== 'install') return;
+  try {
+    await ensureBlobScriptsInOpenTabs({ reloadStale: true });
+  } catch (e) {
+    console.warn('[FDM Ext] 扩展更新后刷新页面失败:', e);
+  }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -569,6 +923,14 @@ chrome.action.onClicked.addListener(() => {
     await ensureReady(true);
   } catch (e) {
     console.warn('[FDM Ext] 就绪探测失败:', e);
+  }
+  // 扩展更新不会向已经打开的页面补发声明式内容脚本，必须主动注入一次。
+  try {
+    // 手动“重新加载”扩展只重启 Service Worker，不触发 onInstalled，
+    // 因此每次唤醒都要跑一次按版本去重的升级检查。
+    await ensureBlobScriptsAfterUpdate();
+  } catch (e) {
+    console.warn('[FDM Ext] Blob 脚本注入失败:', e);
   }
   try { setupContextMenus(); } catch (e) { console.warn('[FDM Ext] 菜单初始化失败:', e); }
   try { trackFormPosts(); } catch (e) { console.warn('[FDM Ext] 表单监听初始化失败:', e); }

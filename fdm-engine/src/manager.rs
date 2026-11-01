@@ -467,13 +467,14 @@ impl TaskManager {
         let entry = self.tasks.read().ok()?.get(&id).cloned()?;
         Some(entry.snapshot().await)
     }
-    /// 本地代理开始把响应体直接写入 `.fdmpart`：先建任务，供 UI 显示进度。
+    /// 本地代理开始把响应体直接写入 `.fdmpart`：建任务并立即占用运行标记，
+    /// 避免任务刚显示就被删除时数据面随后才开始写文件。
     pub async fn begin_capture(
         self: &Arc<Self>,
         url: &str,
         filename: &str,
         total: Option<u64>,
-    ) -> Result<(i64, PathBuf)> {
+    ) -> Result<(i64, PathBuf, Arc<TaskEntry>)> {
         let settings = self.settings.get();
         let dir = settings.default_dir.clone();
         fdm_core::paths::ensure_dir(Path::new(&dir))?;
@@ -497,13 +498,16 @@ impl TaskManager {
         data.connections = 1;
         let part_path = data.part_path.clone();
         let entry = Arc::new(TaskEntry::new(data));
+        if !entry.mark_running() {
+            bail!("无法启动新的捕获任务");
+        }
         self.tasks
             .write()
             .map_err(|_| anyhow!("任务表锁损坏"))?
             .insert(id, entry.clone());
         self.save_tasks().await?;
         self.emit_entry(&entry).await;
-        Ok((id, part_path))
+        Ok((id, part_path, entry))
     }
 
     /// 代理写入过程中刷新已下载字节；事件由调用方节流。
@@ -1331,6 +1335,10 @@ impl TaskManager {
             return false;
         };
         let kind = entry.state.lock().await.kind.clone();
+        // 一次性 capture 无法续传：暂停会中止数据面并丢掉半成品，直接拒绝。
+        if kind == "capture" {
+            return false;
+        }
         // 先取消轮询令牌，再暂停底层引擎。否则 BT/ED2K 的进度回写可能
         // 在 engine.pause 完成前继续进行，表现为“已暂停但进度还在涨”。
         entry.request_cancel();
@@ -1366,6 +1374,11 @@ impl TaskManager {
         let Some(entry) = self.tasks.read().ok().and_then(|m| m.get(&id).cloned()) else {
             return false;
         };
+        let kind = entry.state.lock().await.kind.clone();
+        if kind == "capture" {
+            // 一次性 Blob/POST 数据面无法重放，运行中也不能改回 queued。
+            return false;
+        }
         if entry.is_running() {
             {
                 let mut state = entry.state.lock().await;
@@ -1375,11 +1388,6 @@ impl TaskManager {
             self.emit_entry(&entry).await;
             let _ = self.save_tasks().await;
             return true;
-        }
-        let kind = entry.state.lock().await.kind.clone();
-        if kind == "capture" {
-            // 一次性 POST 数据面无法重放，恢复只能重新生成。
-            return false;
         }
         if kind != "http" {
             {
@@ -3122,10 +3130,12 @@ mod tests {
             dir.path(),
             serde_json::json!({"defaultDir": dir.path().to_string_lossy()}),
         );
-        let (id, part) = m
+        let (id, part, entry) = m
             .begin_capture("http://example.com/backup.tar.gz", "backup.tar.gz", Some(5))
             .await
             .unwrap();
+        assert!(entry.is_running());
+        entry.mark_stopped();
         std::fs::write(&part, b"hello").unwrap();
         m.update_capture(id, 5, Some(5), 2048.0).await.unwrap();
         let mid = m.get_task(id).await.unwrap();

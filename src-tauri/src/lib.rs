@@ -925,6 +925,7 @@ pub fn run() {
                 )),
                 duplicate_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 last_browser_seen: Arc::new(Mutex::new(None)),
+                blob_tickets: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             };
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = serve(listener, server_state).await {

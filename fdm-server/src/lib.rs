@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
@@ -18,11 +19,27 @@ use fdm_core::{github_proxy_candidates, has_sensitive_headers, SettingsStore, Ta
 use fdm_engine::{AddTaskResult, TaskManager};
 use fdm_platform::PlatformService;
 use futures_util::StreamExt;
+use rand::RngCore;
 
 pub mod proxy;
+
+const BLOB_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const BLOB_TICKET_TTL: Duration = Duration::from_secs(30);
+const BLOB_CAPTURE_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+const BLOB_TICKET_LIMIT: usize = 128;
+
+#[derive(Clone)]
+pub struct BlobTicket {
+    filename: String,
+    size: u64,
+    page_url: String,
+    created_at: Instant,
+}
+
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -99,6 +116,8 @@ pub struct ServerState {
     pub duplicate_seq: Arc<AtomicU64>,
     /// 浏览器扩展最近一次访问状态接口的时间，用于判断扩展是否已连接
     pub last_browser_seen: Arc<Mutex<Option<Instant>>>,
+    /// 一次性 Blob 上传票据，键为随机 Token
+    pub blob_tickets: Arc<Mutex<HashMap<String, BlobTicket>>>,
 }
 
 pub fn ensure_extension_assets(data_dir: &Path) -> Result<PathBuf> {
@@ -172,6 +191,8 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/events", get(sse_events))
         .route("/api/browser/status", get(browser_status))
         .route("/api/browser/intercept", post(browser_intercept))
+        .route("/api/browser/blob/prepare", post(blob_prepare))
+        .route("/api/browser/blob/ws", get(blob_ws))
         .fallback(static_handler)
         .layer(
             CorsLayer::new()
@@ -213,28 +234,33 @@ async fn guard_local_request(req: Request, next: Next) -> Response {
     if !host.as_deref().map(is_loopback_host).unwrap_or(false) {
         return err_response(StatusCode::FORBIDDEN, "forbidden host");
     }
+    // WebSocket 无法携带扩展自定义头，且浏览器内容脚本会带页面 Origin。
+    // 该路由自行校验一次性 Ticket，其他请求仍执行完整的 Origin/CSRF 检查。
+    let blob_ws = req.uri().path() == "/api/browser/blob/ws";
     // 扩展可通过自定义头证明自己不是网页（网页发自定义头必然先走被拦截的预检）。
     let trusted_extension = req.headers().contains_key("x-fdm-extension");
     let origin = req
         .headers()
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
-    if let Some(origin) = origin {
-        if !is_allowed_origin(origin) && !trusted_extension {
-            return err_response(StatusCode::FORBIDDEN, "forbidden origin");
+    if !blob_ws {
+        if let Some(origin) = origin {
+            if !is_allowed_origin(origin) && !trusted_extension {
+                return err_response(StatusCode::FORBIDDEN, "forbidden origin");
+            }
         }
-    }
-    // 浏览器发起的跨站请求必须带受信 Origin；覆盖 <a ping> 这类不带 Origin 的简单请求。
-    if let Some(site) = req
-        .headers()
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok())
-    {
-        if !matches!(site, "same-origin" | "none")
-            && !trusted_extension
-            && !origin.map(is_allowed_origin).unwrap_or(false)
+        // 浏览器发起的跨站请求必须带受信 Origin；覆盖 <a ping> 这类不带 Origin 的简单请求。
+        if let Some(site) = req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
         {
-            return err_response(StatusCode::FORBIDDEN, "forbidden cross-site request");
+            if !matches!(site, "same-origin" | "none")
+                && !trusted_extension
+                && !origin.map(is_allowed_origin).unwrap_or(false)
+            {
+                return err_response(StatusCode::FORBIDDEN, "forbidden cross-site request");
+            }
         }
     }
 
@@ -1129,11 +1155,255 @@ async fn browser_status(State(state): State<ServerState>) -> Response {
         "active_tasks": active.len(), "total_tasks": tasks.len(),
         "total_speed": total_speed, "total_speed_str": format_speed(total_speed as f64),
         "download_dir": settings.default_dir,
+        "blob_capture": true,
         // 检测到系统代理时不要接管浏览器：PAC 无法表达 system 模式，会绕过用户代理。
         "proxy_ready": crate::proxy::is_ready() && system_proxy.is_none(),
         "system_proxy": system_proxy
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobPrepareRequest {
+    #[serde(default)]
+    filename: String,
+    size: u64,
+    #[serde(default)]
+    page_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlobTokenQuery {
+    token: String,
+}
+
+fn new_blob_token() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+async fn blob_prepare(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<BlobPrepareRequest>,
+) -> Response {
+    mark_browser_seen(&state);
+    let filename = body.filename.trim();
+    let filename = if filename.is_empty() {
+        "download.bin"
+    } else {
+        filename
+    };
+    let token = new_blob_token();
+    let now = Instant::now();
+    {
+        let Ok(mut tickets) = state.blob_tickets.lock() else {
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, "Blob 会话锁损坏");
+        };
+        tickets.retain(|_, ticket| now.duration_since(ticket.created_at) < BLOB_TICKET_TTL);
+        if tickets.len() >= BLOB_TICKET_LIMIT {
+            return err_response(StatusCode::SERVICE_UNAVAILABLE, "Blob 会话过多");
+        }
+        tickets.insert(
+            token.clone(),
+            BlobTicket {
+                filename: filename.to_string(),
+                size: body.size,
+                page_url: body.page_url.trim().to_string(),
+                created_at: now,
+            },
+        );
+    }
+    // 已由 guard_local_request 校验为 loopback Host；沿用请求 Host 让测试与自定义端口一致。
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1:25432");
+    Json(json!({
+        "ok": true,
+        "wsUrl": format!("ws://{host}/api/browser/blob/ws?token={token}")
+    }))
+    .into_response()
+}
+
+async fn blob_ws(
+    State(state): State<ServerState>,
+    Query(query): Query<BlobTokenQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if query.token.is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "Missing Blob token");
+    }
+    let ticket = {
+        let Ok(mut tickets) = state.blob_tickets.lock() else {
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, "Blob 会话锁损坏");
+        };
+        let now = Instant::now();
+        tickets.retain(|_, ticket| now.duration_since(ticket.created_at) < BLOB_TICKET_TTL);
+        tickets.remove(&query.token)
+    };
+    let Some(ticket) = ticket else {
+        return err_response(StatusCode::FORBIDDEN, "Blob 会话无效或已过期");
+    };
+
+    ws.max_message_size(BLOB_CHUNK_SIZE + 1024)
+        .max_frame_size(BLOB_CHUNK_SIZE + 1024)
+        .on_upgrade(move |socket| async move {
+            if let Err(err) = handle_blob_ws(state, socket, ticket).await {
+                tracing::warn!(error = %err, "Blob 下载通道结束");
+            }
+        })
+}
+
+async fn send_ws_json(socket: &mut WebSocket, value: Value) -> Result<()> {
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .map_err(Into::into)
+}
+
+async fn handle_blob_ws(
+    state: ServerState,
+    mut socket: WebSocket,
+    ticket: BlobTicket,
+) -> Result<()> {
+    let page_url = if ticket.page_url.is_empty() {
+        "blob://browser"
+    } else {
+        ticket.page_url.as_str()
+    };
+    let (id, part_path, capture_entry) = match state
+        .manager
+        .begin_capture(page_url, &ticket.filename, Some(ticket.size))
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            let _ = send_ws_json(
+                &mut socket,
+                json!({"type": "error", "message": err.to_string()}),
+            )
+            .await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = state.hooks.open_progress(id).await {
+        tracing::warn!(error = %err, "打开 Blob 下载进度窗口失败");
+    }
+
+    let outcome = run_blob_ws(&state, &mut socket, id, &part_path, ticket.size).await;
+    let result = match outcome {
+        Ok(written) => match state.manager.finish_capture(id, written).await {
+            Ok(_) => {
+                let _ = send_ws_json(&mut socket, json!({"type": "done", "taskId": id})).await;
+                Ok(())
+            }
+            Err(err) => {
+                if state.manager.capture_exists(id).await {
+                    state.manager.fail_capture(id, &err.to_string()).await;
+                }
+                let _ = send_ws_json(
+                    &mut socket,
+                    json!({"type": "error", "message": err.to_string()}),
+                )
+                .await;
+                Err(err)
+            }
+        },
+        Err(err) => {
+            if state.manager.capture_exists(id).await {
+                state.manager.fail_capture(id, &err.to_string()).await;
+                let _ = send_ws_json(
+                    &mut socket,
+                    json!({"type": "error", "message": err.to_string()}),
+                )
+                .await;
+            }
+            Err(err)
+        }
+    };
+    capture_entry.mark_stopped();
+    let _ = socket.send(Message::Close(None)).await;
+    result
+}
+
+async fn run_blob_ws(
+    state: &ServerState,
+    socket: &mut WebSocket,
+    id: i64,
+    part_path: &Path,
+    expected_size: u64,
+) -> Result<u64> {
+    let mut file = tokio::fs::File::create(part_path).await?;
+    let mut received = 0_u64;
+    let mut last_emit = Instant::now() - BLOB_CAPTURE_PROGRESS_INTERVAL;
+    let mut last_sample = Instant::now();
+    let mut last_bytes = 0_u64;
+    send_ws_json(socket, json!({"type": "ready", "taskId": id})).await?;
+
+    loop {
+        if state.manager.capture_should_stop(id).await || !state.manager.capture_exists(id).await {
+            return Err(anyhow::anyhow!("Blob 任务已取消"));
+        }
+        let message = match tokio::time::timeout(Duration::from_millis(500), socket.recv()).await {
+            Err(_) => continue,
+            Ok(None) => return Err(anyhow::anyhow!("浏览器连接已关闭")),
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Ok(Some(Ok(message))) => message,
+        };
+        match message {
+            Message::Binary(data) => {
+                if data.len() > BLOB_CHUNK_SIZE {
+                    return Err(anyhow::anyhow!("Blob 分块超过 4 MiB"));
+                }
+                let next = received
+                    .checked_add(data.len() as u64)
+                    .ok_or_else(|| anyhow::anyhow!("Blob 大小溢出"))?;
+                if next > expected_size {
+                    return Err(anyhow::anyhow!("Blob 数据超过声明大小"));
+                }
+                file.write_all(&data).await?;
+                received = next;
+                if last_emit.elapsed() >= BLOB_CAPTURE_PROGRESS_INTERVAL {
+                    let dt = last_sample.elapsed().as_secs_f64().max(0.001);
+                    let speed = (received - last_bytes) as f64 / dt;
+                    let _ = state
+                        .manager
+                        .update_capture(id, received, Some(expected_size), speed)
+                        .await;
+                    last_bytes = received;
+                    last_sample = Instant::now();
+                    last_emit = Instant::now();
+                }
+                send_ws_json(socket, json!({"type": "ack", "received": received})).await?;
+            }
+            Message::Text(text) => {
+                let value: Value = serde_json::from_str(text.as_str())?;
+                match value.get("type").and_then(Value::as_str) {
+                    Some("end") => {
+                        if received != expected_size {
+                            return Err(anyhow::anyhow!(
+                                "Blob 数据不完整：收到 {received} / {expected_size} 字节"
+                            ));
+                        }
+                        file.flush().await?;
+                        let _ = state
+                            .manager
+                            .update_capture(id, received, Some(expected_size), 0.0)
+                            .await;
+                        return Ok(received);
+                    }
+                    Some("cancel") => return Err(anyhow::anyhow!("浏览器取消 Blob 下载")),
+                    _ => return Err(anyhow::anyhow!("未知 Blob 控制消息")),
+                }
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+            Message::Pong(_) => {}
+            Message::Close(_) => return Err(anyhow::anyhow!("浏览器关闭 Blob 连接")),
+        }
+    }
 }
 
 async fn browser_intercept(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
@@ -1360,6 +1630,8 @@ mod tests {
 
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tower::ServiceExt;
 
     struct MockPlatform {
@@ -1521,8 +1793,103 @@ mod tests {
             duplicate_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             duplicate_seq: Arc::new(AtomicU64::new(1)),
             last_browser_seen: Arc::new(Mutex::new(None)),
+            blob_tickets: Arc::new(Mutex::new(HashMap::new())),
         };
         (router(state), platform, hooks, temp)
+    }
+
+    fn blob_fixture() -> (Router, ServerState, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Arc::new(SettingsStore::load(temp.path()).unwrap());
+        settings
+            .update_patch(&json!({"defaultDir": temp.path().to_string_lossy()}))
+            .unwrap();
+        let manager = TaskManager::new(Some(temp.path().to_path_buf()), settings.clone()).unwrap();
+        let platform = Arc::new(MockPlatform {
+            dir: temp.path().join("extension"),
+            opened_browsers: Arc::new(Mutex::new(Vec::new())),
+        });
+        let hooks = Arc::new(MockHooks {
+            guide_opened: AtomicBool::new(false),
+            closed_progress: Arc::new(Mutex::new(Vec::new())),
+        });
+        let state = ServerState {
+            manager,
+            settings,
+            platform,
+            hooks,
+            data_dir: temp.path().to_path_buf(),
+            duplicate_requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            duplicate_seq: Arc::new(AtomicU64::new(1)),
+            last_browser_seen: Arc::new(Mutex::new(None)),
+            blob_tickets: Arc::new(Mutex::new(HashMap::new())),
+        };
+        (router(state.clone()), state, temp)
+    }
+
+    type TestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn start_blob_server() -> (String, ServerState, tempfile::TempDir) {
+        let (app, state, temp) = blob_fixture();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), state, temp)
+    }
+
+    async fn prepare_blob(base: &str, filename: &str, size: u64) -> String {
+        let response = reqwest::Client::new()
+            .post(format!("{base}/api/browser/blob/prepare"))
+            .header("X-FDM-Extension", "1")
+            .json(&json!({
+                "filename": filename,
+                "size": size,
+                "pageUrl": "https://github.com/acme/repo"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let value = response.json::<Value>().await.unwrap();
+        value["wsUrl"].as_str().unwrap().to_string()
+    }
+
+    async fn next_ws_json(ws: &mut TestWs) -> Value {
+        loop {
+            match ws.next().await.unwrap().unwrap() {
+                WsMessage::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
+                WsMessage::Binary(_) => panic!("unexpected binary websocket response"),
+                _ => {}
+            }
+        }
+    }
+
+    async fn connect_blob_ws(ws_url: &str) -> (TestWs, Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        let ready = next_ws_json(&mut ws).await;
+        assert_eq!(ready["type"], "ready");
+        (ws, ready)
+    }
+
+    async fn upload_blob(base: &str, filename: &str, data: &[u8]) -> i64 {
+        let ws_url = prepare_blob(base, filename, data.len() as u64).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let task_id = ready["taskId"].as_i64().unwrap();
+        for chunk in data.chunks(BLOB_CHUNK_SIZE) {
+            ws.send(WsMessage::Binary(chunk.to_vec().into()))
+                .await
+                .unwrap();
+            assert_eq!(next_ws_json(&mut ws).await["type"], "ack");
+        }
+        ws.send(WsMessage::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(next_ws_json(&mut ws).await["type"], "done");
+        task_id
     }
 
     async fn json_response(app: &Router, mut request: Request<Body>) -> (StatusCode, Value) {
@@ -1787,5 +2154,192 @@ mod tests {
         let closed = hooks.closed_progress.lock().unwrap().clone();
         assert!(closed.contains(&id2));
         assert!(closed.contains(&id3));
+    }
+
+    #[tokio::test]
+    async fn blob_capture_handles_chunk_boundaries_and_consumes_ticket_once() {
+        let (base, state, temp) = start_blob_server().await;
+        let sizes = [
+            0_u64,
+            1,
+            BLOB_CHUNK_SIZE as u64,
+            BLOB_CHUNK_SIZE as u64 + 123,
+        ];
+
+        for (index, size) in sizes.into_iter().enumerate() {
+            let expected: Vec<u8> = (0..size).map(|value| (value % 251) as u8).collect();
+            let filename = format!("blob-{index}.bin");
+            let ws_url = prepare_blob(&base, &filename, size).await;
+            let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+            let task_id = ready["taskId"].as_i64().unwrap();
+
+            for chunk in expected.chunks(BLOB_CHUNK_SIZE) {
+                ws.send(WsMessage::Binary(chunk.to_vec().into()))
+                    .await
+                    .unwrap();
+                let ack = next_ws_json(&mut ws).await;
+                assert_eq!(ack["type"], "ack");
+            }
+            ws.send(WsMessage::Text(r#"{"type":"end"}"#.into()))
+                .await
+                .unwrap();
+            let done = next_ws_json(&mut ws).await;
+            assert_eq!(done["type"], "done");
+            assert_eq!(done["taskId"], task_id);
+
+            let snapshot = state.manager.get_task(task_id).await.unwrap();
+            assert_eq!(snapshot.status, "done");
+            assert_eq!(std::fs::read(&snapshot.filepath).unwrap(), expected);
+            assert!(!std::path::Path::new(&format!("{}.fdmpart", snapshot.filepath)).exists());
+
+            assert!(tokio_tungstenite::connect_async(&ws_url).await.is_err());
+        }
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn blob_capture_rejects_bad_token_oversize_and_disconnect() {
+        let (base, state, temp) = start_blob_server().await;
+
+        assert!(tokio_tungstenite::connect_async(format!(
+            "{}/api/browser/blob/ws?token=bogus",
+            base.replace("http://", "ws://")
+        ))
+        .await
+        .is_err());
+
+        let ws_url = prepare_blob(&base, "oversize.bin", 5).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let oversize_task = ready["taskId"].as_i64().unwrap();
+        ws.send(WsMessage::Binary(vec![0_u8; 6].into()))
+            .await
+            .unwrap();
+        let error = next_ws_json(&mut ws).await;
+        assert_eq!(error["type"], "error");
+        assert_eq!(
+            state.manager.get_task(oversize_task).await.unwrap().status,
+            "error"
+        );
+
+        let ws_url = prepare_blob(&base, "huge-chunk.bin", 8 * 1024 * 1024).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let huge_task = ready["taskId"].as_i64().unwrap();
+        // 服务端可能在校验到超大帧时直接断开，因此发送失败也属于预期路径。
+        let _ = ws
+            .send(WsMessage::Binary(vec![0_u8; BLOB_CHUNK_SIZE + 1].into()))
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let failed = state
+                    .manager
+                    .get_task(huge_task)
+                    .await
+                    .map(|task| task.status == "error")
+                    .unwrap_or(false);
+                if failed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let ws_url = prepare_blob(&base, "disconnect.bin", 10).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let disconnect_task = ready["taskId"].as_i64().unwrap();
+        ws.send(WsMessage::Binary(vec![1_u8; 4].into()))
+            .await
+            .unwrap();
+        let ack = next_ws_json(&mut ws).await;
+        assert_eq!(ack["type"], "ack");
+        drop(ws);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(snapshot) = state.manager.get_task(disconnect_task).await {
+                    if snapshot.status == "error" {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_are_rejected_for_blob_capture() {
+        let (base, state, temp) = start_blob_server().await;
+        let data = vec![3_u8; 1024];
+        let ws_url = prepare_blob(&base, "pause.bin", data.len() as u64).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let task_id = ready["taskId"].as_i64().unwrap();
+
+        assert!(!state.manager.pause_task(task_id).await);
+        assert!(!state.manager.resume_task(task_id).await);
+
+        ws.send(WsMessage::Binary(data.clone().into()))
+            .await
+            .unwrap();
+        assert_eq!(next_ws_json(&mut ws).await["type"], "ack");
+        ws.send(WsMessage::Text(r#"{"type":"end"}"#.into()))
+            .await
+            .unwrap();
+        assert_eq!(next_ws_json(&mut ws).await["type"], "done");
+        let snapshot = state.manager.get_task(task_id).await.unwrap();
+        assert_eq!(snapshot.status, "done");
+        assert_eq!(std::fs::read(snapshot.filepath).unwrap(), data);
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn removing_blob_task_waits_for_writer_and_cleans_part() {
+        let (base, state, temp) = start_blob_server().await;
+        let ws_url = prepare_blob(&base, "cancel.bin", 1024 * 1024).await;
+        let (mut ws, ready) = connect_blob_ws(&ws_url).await;
+        let task_id = ready["taskId"].as_i64().unwrap();
+        ws.send(WsMessage::Binary(vec![7_u8; 1024].into()))
+            .await
+            .unwrap();
+        let _ = next_ws_json(&mut ws).await;
+        let snapshot = state.manager.get_task(task_id).await.unwrap();
+        let part_path = format!("{}.fdmpart", snapshot.filepath);
+
+        assert!(tokio::time::timeout(
+            Duration::from_secs(3),
+            state.manager.remove_task(task_id, true)
+        )
+        .await
+        .unwrap());
+        assert!(state.manager.get_task(task_id).await.is_none());
+        assert!(!std::path::Path::new(&part_path).exists());
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn blob_ticket_expires_and_duplicate_filename_stays_unique() {
+        let (base, state, temp) = start_blob_server().await;
+
+        let expired_url = prepare_blob(&base, "expired.bin", 1).await;
+        {
+            let mut tickets = state.blob_tickets.lock().unwrap();
+            let ticket = tickets.values_mut().next().unwrap();
+            ticket.created_at = Instant::now() - BLOB_TICKET_TTL - Duration::from_secs(1);
+        }
+        assert!(tokio_tungstenite::connect_async(&expired_url)
+            .await
+            .is_err());
+
+        let first = upload_blob(&base, "same.bin", b"first").await;
+        let second = upload_blob(&base, "same.bin", b"second").await;
+        let first = state.manager.get_task(first).await.unwrap();
+        let second = state.manager.get_task(second).await.unwrap();
+        assert_ne!(first.filepath, second.filepath);
+        assert_eq!(std::fs::read(first.filepath).unwrap(), b"first");
+        assert_eq!(std::fs::read(second.filepath).unwrap(), b"second");
+        drop(temp);
     }
 }

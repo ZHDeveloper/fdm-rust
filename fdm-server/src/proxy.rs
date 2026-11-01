@@ -243,17 +243,29 @@ async fn capture_body(
     total: Option<u64>,
     resp: reqwest::Response,
 ) -> Result<()> {
-    let (id, part_path) = state
+    let (id, part_path, capture_entry) = state
         .manager
         .begin_capture(url.as_str(), filename, total)
         .await?;
+    let result = capture_body_inner(state, id, &part_path, total, resp).await;
+    capture_entry.mark_stopped();
+    result
+}
+
+async fn capture_body_inner(
+    state: &ServerState,
+    id: i64,
+    part_path: &std::path::Path,
+    total: Option<u64>,
+    resp: reqwest::Response,
+) -> Result<()> {
     // 与浏览器自动接管保持一致：自动下载时立刻弹出进度窗。
     if state.settings.get().auto_download {
         if let Err(err) = state.hooks.open_progress(id).await {
             tracing::warn!(error = %err, "打开下载进度窗口失败");
         }
     }
-    let mut file = match tokio::fs::File::create(&part_path).await {
+    let mut file = match tokio::fs::File::create(part_path).await {
         Ok(file) => file,
         Err(err) => {
             let err = anyhow::Error::from(err).context(format!("创建 {}", part_path.display()));
@@ -273,7 +285,7 @@ async fn capture_body(
             drop(file);
             // 暂停保留 .fdmpart；任务被删除则顺手清理半成品。
             if !state.manager.capture_exists(id).await {
-                let _ = tokio::fs::remove_file(&part_path).await;
+                let _ = tokio::fs::remove_file(part_path).await;
             }
             return Ok(());
         }

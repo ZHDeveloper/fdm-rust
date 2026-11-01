@@ -111,12 +111,29 @@ function ctxTargets(id) {
   return [id];
 }
 
+// 一次性 capture（代理/Blob）无法续传，暂停会中止并丢弃数据，只允许取消。
+function isCaptureTask(t) {
+  return !!t && t.kind === 'capture';
+}
+
+function pauseTasks(ids) {
+  for (const id of ids) {
+    if (!isCaptureTask(tasks.get(id))) window.api.pause(id);
+  }
+}
+
+function resumeTasks(ids) {
+  for (const id of ids) {
+    if (!isCaptureTask(tasks.get(id))) window.api.resume(id);
+  }
+}
+
 function buildCtxItems(ids) {
   const ts = ids.map((i) => tasks.get(i)).filter(Boolean);
   if (!ts.length) return [];
   const multi = ts.length > 1;
-  const canResume = ts.some((t) => ['paused', 'error', 'queued'].includes(t.status));
-  const canPause = ts.some((t) => ['downloading', 'connecting', 'waiting', 'queued', 'merging'].includes(t.status));
+  const canResume = ts.some((t) => !isCaptureTask(t) && ['paused', 'error', 'queued'].includes(t.status));
+  const canPause = ts.some((t) => !isCaptureTask(t) && ['downloading', 'connecting', 'waiting', 'queued', 'merging'].includes(t.status));
   const allDone = ts.every((t) => t.status === 'done');
   const one = ts.length === 1 ? ts[0] : null;
   const n = multi ? `(${ts.length} 项)` : '';
@@ -124,11 +141,11 @@ function buildCtxItems(ids) {
   const items = [];
   items.push({
     label: `开始/继续下载 ${n}`.trim(), disabled: !canResume,
-    act: () => ids.forEach((i) => window.api.resume(i)),
+    act: () => resumeTasks(ids),
   });
   items.push({
     label: `暂停 ${n}`.trim(), disabled: !canPause,
-    act: () => ids.forEach((i) => window.api.pause(i)),
+    act: () => pauseTasks(ids),
   });
   items.push({ sep: true });
   if (one) {
@@ -345,8 +362,8 @@ function render() {
 function updateToolbar() {
   const t = tasks.get(selectedId);
   const has = !!t;
-  $('#btnResume').disabled = !(t && (t.status === 'paused' || t.status === 'error'));
-  $('#btnPause').disabled = !(t && ['downloading', 'connecting', 'waiting', 'queued', 'seeding'].includes(t.status));
+  $('#btnResume').disabled = !(t && !isCaptureTask(t) && (t.status === 'paused' || t.status === 'error'));
+  $('#btnPause').disabled = !(t && !isCaptureTask(t) && ['downloading', 'connecting', 'waiting', 'queued', 'seeding'].includes(t.status));
   $('#btnDelete').disabled = !has;
   $('#btnDeleteAll').disabled = tasks.size === 0;
   $('#btnFolder').disabled = !has;
@@ -370,8 +387,8 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'F5') { e.preventDefault(); location.reload(); }
 });
 
-function resumeAll() { for (const t of tasks.values()) if (['paused','error','queued'].includes(t.status)) window.api.resume(t.id); }
-function pauseAll() { for (const t of tasks.values()) if (['downloading','connecting','waiting','queued','seeding'].includes(t.status)) window.api.pause(t.id); }
+function resumeAll() { for (const t of tasks.values()) if (!isCaptureTask(t) && ['paused','error','queued'].includes(t.status)) window.api.resume(t.id); }
+function pauseAll() { for (const t of tasks.values()) if (!isCaptureTask(t) && ['downloading','connecting','waiting','queued','seeding'].includes(t.status)) window.api.pause(t.id); }
 
 // Escape hatch for tasks that refuse to disappear (e.g. an entry corrupted by
 // an older build). Clears everything from the list unconditionally.
@@ -395,15 +412,15 @@ async function clearAllTasks() {
 window.api.onMenu((m) => {
   if (m === 'resumeAll') resumeAll();
   else if (m === 'pauseAll') pauseAll();
-  else if (m === 'resumeSelected') selectedId && window.api.resume(selectedId);
-  else if (m === 'pauseSelected') selectedId && window.api.pause(selectedId);
+  else if (m === 'resumeSelected') selectedId && resumeTasks([selectedId]);
+  else if (m === 'pauseSelected') selectedId && pauseTasks([selectedId]);
   else if (m === 'deleteSelected') $('#btnDelete').click();
   else if (m === 'clearAll') clearAllTasks();
   else if (m === 'refresh') location.reload();
 });
-$('#btnResume').onclick = () => selectedId && window.api.resume(selectedId);
-$('#btnPause').onclick = () => selectedId && window.api.pause(selectedId);
-$('#btnPauseAll').onclick = () => { for (const t of tasks.values()) if (['downloading', 'connecting', 'waiting', 'queued', 'seeding'].includes(t.status)) window.api.pause(t.id); };
+$('#btnResume').onclick = () => selectedId && resumeTasks([selectedId]);
+$('#btnPause').onclick = () => selectedId && pauseTasks([selectedId]);
+$('#btnPauseAll').onclick = () => pauseAll();
 $('#btnDelete').onclick = () => selectedId && deleteTasks([selectedId]);
 $('#btnDeleteAll').onclick = () => clearAllTasks();
 $('#btnFolder').onclick = () => { const t = tasks.get(selectedId); if (t) window.api.openFolder(t.dir); };
