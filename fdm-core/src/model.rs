@@ -861,7 +861,9 @@ mod tests {
     fn single_segment_layout_is_not_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let mut data = http_data(8);
-        data.filepath = dir.path().join("a.bin");
+        // setup_paths() 会用 dir + filename 重新推导 filepath，直接赋值 filepath 会被覆盖，
+        // 必须改设 dir，否则所有用例都写到系统临时目录的同一个 a.bin.fdmcfg 上互相污染。
+        data.dir = dir.path().to_path_buf();
         data.setup_paths();
         data.segments = vec![Segment::new(0, 0, 9)];
 
@@ -877,7 +879,7 @@ mod tests {
     fn multi_segment_layout_persists_and_restores_connections() {
         let dir = tempfile::tempdir().unwrap();
         let mut data = http_data(8);
-        data.filepath = dir.path().join("a.bin");
+        data.dir = dir.path().to_path_buf();
         data.setup_paths();
         data.total = Some(100);
         data.segments = vec![Segment::new(0, 0, 49), Segment::new(1, 50, 99)];
@@ -886,7 +888,7 @@ mod tests {
         assert!(data.cfg_path.exists(), "多分片布局必须落盘以支持断点续传");
 
         let mut restored = http_data(2);
-        restored.filepath = dir.path().join("a.bin");
+        restored.dir = dir.path().to_path_buf();
         restored.setup_paths();
         assert!(restored.load_cfg());
         assert_eq!(restored.segments.len(), 2);
@@ -898,16 +900,15 @@ mod tests {
     #[test]
     fn load_cfg_tolerates_config_without_connections_field() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.bin");
+        let mut data = http_data(6);
+        data.dir = dir.path().to_path_buf();
+        data.setup_paths();
+        // 先 setup_paths 再按真实 cfg_path 落盘，模拟老版本没有 connections 字段的配置。
         std::fs::write(
-            format!("{}.fdmcfg", path.display()),
+            &data.cfg_path,
             r#"{"url":"https://example.com/a.bin","filename":"a.bin","filepath":"","total":100,"segments":[{"index":0,"start":0,"end":49,"cur":0,"done":false},{"index":1,"start":50,"end":99,"cur":0,"done":false}]}"#,
         )
         .unwrap();
-
-        let mut data = http_data(6);
-        data.filepath = path;
-        data.setup_paths();
         assert!(
             data.load_cfg(),
             "缺少 connections 字段的旧配置必须仍能恢复，否则老用户直接丢失续传"
