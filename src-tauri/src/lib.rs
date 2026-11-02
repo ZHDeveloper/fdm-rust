@@ -961,6 +961,8 @@ pub fn run() {
             let show_extension_guide =
                 !background && startup_payload.is_none() && !settings.get().extension_guide_shown;
             let main_url = Url::parse(BASE_URL)?;
+            // 只有 macOS 分支会重新赋值，其他平台会被判为多余的 mut。
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             let mut main_window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(main_url))
                     .title("FDM · 极速多线程下载器")
