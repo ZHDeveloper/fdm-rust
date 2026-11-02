@@ -123,6 +123,10 @@ if (window.fitPopupToContent) window.fitPopupToContent('extension_guide', 560, {
 setTimeout(fitWindow, 220);
 
 if ($('#browserSelect')) $('#browserSelect').addEventListener('change', fitWindow);
-refreshInfo().then(fitWindow);
+// 窗口隐藏创建：首次检测完成、内容高度定型后再显示（异常时由 Rust 兜底显示）
+refreshInfo()
+  .then(fitWindow)
+  .catch(() => {})
+  .finally(() => { if (window.showPopupOnce) window.showPopupOnce('extension_guide'); });
 setInterval(refreshInfo, 2000);
 fitWindow();

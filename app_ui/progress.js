@@ -34,8 +34,10 @@ function closeProgressWindow() {
 // 单连接（无分块进度，预留同样空间）都保持同一高度。
 let fixedHeightApplied = false;
 function fitProgressPopup() {
-  if (fixedHeightApplied || !window.api || !window.fitPopupToContent || !document.body) return;
   const target = taskId != null ? `prog_${taskId}` : 'progress';
+  // 窗口由 Rust 侧隐藏创建，固定高度校准后（本页为确定性 no-op）再显示
+  if (window.showPopupOnce) window.showPopupOnce(target, 30);
+  if (fixedHeightApplied || !window.api || !window.fitPopupToContent || !document.body) return;
   const blocks = document.getElementById('blocks');
   const label = document.getElementById('blockLabel');
   const threads = document.querySelector('.sec-threads');

@@ -241,6 +241,10 @@
         height
       }).catch(() => {});
     },
+    showWindow: (target) => {
+      const tgt = target || resolveCurrentTarget();
+      return request('/api/system/window', 'POST', { action: 'show', target: tgt }).catch(() => {});
+    },
 
     // ---- 系统消息框（原生 MessageBoxW） ----
     message: (message, title = 'FDM', kind = 'info') =>

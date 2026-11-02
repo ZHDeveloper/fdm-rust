@@ -100,13 +100,27 @@ impl TauriHooks {
             .title(title)
             .inner_size(width, height)
             .resizable(resizable)
+            .visible(false)
             .center();
         if label.starts_with("prog_") {
             builder = builder.min_inner_size(460.0, 280.0);
         }
         let window = builder.build()?;
-        let _ = window.set_focus();
+        // 弹窗先隐藏创建：页面完成高度自适应后通过 show 窗口操作再显示，
+        // 消除首次打开"先按初始高度显示再收高"的闪动；
+        // 页面异常未调用 show 时，由兜底线程最迟 1.2s 后强制显示。
+        Self::show_later(&window, 1200);
         Ok(true)
+    }
+
+    /// 延迟显示窗口（兜底）。正常流程由页面在收高完成后主动调用 show 窗口操作。
+    fn show_later(window: &tauri::WebviewWindow<tauri::Wry>, ms: u64) {
+        let win = window.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms));
+            let _ = win.show();
+            let _ = win.set_focus();
+        });
     }
 
     #[cfg(not(debug_assertions))]
@@ -261,8 +275,10 @@ impl DesktopHooks for TauriHooks {
             let _ = window.eval(&js);
             let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(520.0, 189.0)));
             let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            // 复用时同样先隐藏，页面重新加载并收高后由页面主动 show，
+            // 避免 185/189 → 内容高度的可见闪动
+            let _ = window.hide();
+            Self::show_later(&window, 1200);
             return Ok(true);
         }
         self.create_window(
@@ -287,8 +303,9 @@ impl DesktopHooks for TauriHooks {
             let _ = window.set_title(title);
             let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(410.0, 185.0)));
             let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            // 复用时先隐藏，页面重新加载并收高后由页面主动 show
+            let _ = window.hide();
+            Self::show_later(&window, 1200);
             return Ok(true);
         }
         self.create_window("duplicate", url.to_string(), title, 410.0, 185.0, false)
@@ -486,6 +503,11 @@ impl DesktopHooks for TauriHooks {
                     .set_size(tauri::Size::Logical(LogicalSize::new(width, height)))
                     .is_ok();
                 json!({"ok": ok, "width": width, "height": height})
+            }
+            "show" => {
+                let ok = window.show().is_ok();
+                let _ = window.set_focus();
+                json!({"ok": ok})
             }
             "close" => {
                 let ok = if label == "main" {

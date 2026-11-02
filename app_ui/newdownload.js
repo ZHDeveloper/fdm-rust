@@ -304,6 +304,18 @@ function measureContentHeight() {
   return Math.ceil(contentHeight + foot.offsetHeight + frameHeight);
 }
 
+// 窗口由 Rust 侧隐藏创建：内容收高并复校完成后再显示，消除首开闪动（每页一次）
+let newdownloadShown = false;
+function showNewdownloadWindow() {
+  if (newdownloadShown) return;
+  newdownloadShown = true;
+  setTimeout(() => {
+    if (window.api && typeof window.api.showWindow === 'function') {
+      window.api.showWindow('newdownload');
+    }
+  }, 40);
+}
+
 function applyAdaptiveHeight() {
   if (!(window.api && window.api.resizeWindow)) return;
   const targetHeight = Math.max(180, Math.min(850, measureContentHeight()));
@@ -313,6 +325,7 @@ function applyAdaptiveHeight() {
   }).catch(() => {});
   // 窗口尺寸变化后滚动条/换行可能微调，再校正一次
   setTimeout(() => {
+    showNewdownloadWindow();
     if (!(window.api && window.api.resizeWindow)) return;
     const refined = Math.max(180, Math.min(850, measureContentHeight()));
     if (Math.abs(refined - currentWinHeight) > 2) {

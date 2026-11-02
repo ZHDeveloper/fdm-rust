@@ -301,6 +301,8 @@ function fill(s) {
 initTabs();
 requestAnimationFrame(() => {
   if (window.fitPopupToContent) window.fitPopupToContent('settings', 520, { maxHeight: SETTINGS_MAX_HEIGHT });
+  // 窗口隐藏创建，首次收高完成后再显示
+  if (window.showPopupOnce) window.showPopupOnce('settings');
 });
 window.api.onSettingsLoad((s) => {
   fill(s);

@@ -82,4 +82,16 @@
     settleOverflow(3);
     return targetHeight;
   };
+
+  // 内容就绪后显示窗口：配合 Rust 侧 visible(false) 创建弹窗，
+  // 先完成收高再显示，消除首次打开的高度闪动。每页只执行一次。
+  window.showPopupOnce = function showPopupOnce(target, delay) {
+    if (showPopupOnce.done) return;
+    showPopupOnce.done = true;
+    setTimeout(() => {
+      if (window.api && typeof window.api.showWindow === 'function') {
+        window.api.showWindow(target);
+      }
+    }, delay == null ? 60 : delay);
+  };
 })();
