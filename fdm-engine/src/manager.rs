@@ -33,6 +33,16 @@ fn normalize_path(path: &str) -> String {
         .to_lowercase()
 }
 
+/// 重试退避：固定 1.5s 会让同一任务的所有分片同时重试，用确定性抖动打散。
+fn retry_delay(seed: usize, attempt: u32) -> Duration {
+    let jitter = ((seed as u64)
+        .wrapping_mul(137)
+        .wrapping_add((attempt as u64).wrapping_mul(331))
+        % 12)
+        * 100;
+    Duration::from_millis(1500 + jitter)
+}
+
 /// 探测没拿到大小时，从真实下载响应补全（206 的 Content-Range 或 200 的 Content-Length）。
 fn response_total(status: u16, headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let total = match status {
@@ -55,19 +65,58 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 /// 删除文件；Windows 上刚取消的任务可能短暂占用句柄，因此做少量重试。
+///
+/// 重试要走阻塞线程：删除是同步 IO，且重试间隙的等待不应占用 tokio worker。
 async fn remove_file_with_retry(path: &Path, label: &str) {
     if path.as_os_str().is_empty() {
         return;
     }
-    for attempt in 0..REMOVE_RETRIES {
-        match fs::remove_file(path) {
-            Ok(()) => return,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
-            Err(err) if attempt + 1 == REMOVE_RETRIES => {
-                tracing::warn!(error = %err, path = %path.display(), label = label, "删除文件失败");
+    let path = path.to_path_buf();
+    let label = label.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        for attempt in 0..REMOVE_RETRIES {
+            match fs::remove_file(&path) {
+                Ok(()) => return,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+                Err(err) if attempt + 1 == REMOVE_RETRIES => {
+                    tracing::warn!(error = %err, path = %path.display(), label = label, "删除文件失败");
+                }
+                Err(_) => std::thread::sleep(REMOVE_RETRY_DELAY),
             }
-            Err(_) => sleep(REMOVE_RETRY_DELAY).await,
         }
+    })
+    .await;
+}
+
+/// 删除前一次性统计各路径仍被多少个任务引用。
+///
+/// 逐个删除时每次都全表扫描会让“清空列表”退化成 O(N²)；这里一次扫描建表，
+/// 删除时 O(1) 查询。计数包含待删除任务自身，因此“仍被引用”= 计数 > 1。
+#[derive(Default)]
+struct PathRefCounts {
+    part: HashMap<String, usize>,
+    cfg: HashMap<String, usize>,
+    file: HashMap<String, usize>,
+}
+
+impl PathRefCounts {
+    fn bump(map: &mut HashMap<String, usize>, path: &Path) {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        *map
+            .entry(normalize_path(&path.to_string_lossy()))
+            .or_insert(0) += 1;
+    }
+
+    fn shared(map: &HashMap<String, usize>, path: &Path) -> bool {
+        if path.as_os_str().is_empty() {
+            return false;
+        }
+        map.get(&normalize_path(&path.to_string_lossy()))
+            .copied()
+            .unwrap_or(0)
+            > 1
     }
 }
 
@@ -440,9 +489,16 @@ impl TaskManager {
             saved.push(state.saved());
         }
         saved.sort_by_key(|t| t.id);
-        let text = serde_json::to_vec_pretty(&saved)?;
-        atomic_write(&self.tasks_file, &text)?;
-        Ok(())
+        // 序列化 + 原子写盘整体交给阻塞线程：任务多时 tasks.json 可达 MB 级，
+        // 直接在 async 上下文里写会卡住整个 tokio worker。
+        let path = self.tasks_file.clone();
+        tokio::task::spawn_blocking(move || {
+            let text = serde_json::to_vec_pretty(&saved)?;
+            atomic_write(&path, &text)?;
+            Ok(())
+        })
+        .await
+        .map_err(|err| anyhow!("保存任务列表失败: {err}"))?
     }
 
     fn entries(&self) -> Vec<Arc<TaskEntry>> {
@@ -947,6 +1003,10 @@ impl TaskManager {
                     }
                 });
             let bytes = if let Some(path) = raw_path {
+                // 只接受本地 .torrent：该分支会把任意文件内容复制进 BT 缓存目录。
+                if !fdm_core::paths::is_torrent_path(Path::new(&path)) {
+                    return Err(anyhow!("只支持本地 .torrent 文件：{path}"));
+                }
                 Some(std::fs::read(&path).with_context(|| format!("读取种子文件失败：{path}"))?)
             } else if let Some(torrent_url) = raw_url {
                 let client = self.http_client().context("创建种子下载客户端失败")?;
@@ -1248,12 +1308,35 @@ impl TaskManager {
         }
     }
 
+    /// 一次扫描收集目标目录下已被占用的文件名（任务 + 磁盘）。
+    ///
+    /// 旧实现每个候选编号都做一次全表扫描（`find_name_conflict`）+ 一次磁盘
+    /// `exists`，编号冲突多时是 O(任务数 × 候选数)；这里改成一次扫描 + O(1) 查表。
+    async fn taken_names(&self, dir: &str) -> HashSet<String> {
+        let want_dir = normalize_path(dir);
+        let mut names = HashSet::new();
+        for entry in self.entries() {
+            let state = entry.state.lock().await;
+            if state.filename.is_empty() {
+                continue;
+            }
+            if normalize_path(&state.dir.to_string_lossy()) == want_dir {
+                names.insert(state.filename.to_lowercase());
+            }
+        }
+        if let Ok(mut dir_entries) = tokio::fs::read_dir(dir).await {
+            while let Ok(Some(entry)) = dir_entries.next_entry().await {
+                names.insert(entry.file_name().to_string_lossy().to_lowercase());
+            }
+        }
+        names
+    }
+
     async fn unique_filename(&self, dir: &str, base: &str) -> String {
+        let taken = self.taken_names(dir).await;
         for number in 1..=9999u32 {
             let candidate = fdm_core::numbered_filename(base, number);
-            if self.find_name_conflict(dir, &candidate).await.is_none()
-                && !Path::new(dir).join(&candidate).exists()
-            {
+            if !taken.contains(&candidate.to_lowercase()) {
                 return candidate;
             }
         }
@@ -1456,11 +1539,33 @@ impl TaskManager {
         (part_shared, cfg_shared, file_shared)
     }
 
-    pub async fn remove_task(&self, id: i64, delete_file: bool) -> bool {
-        self.remove_task_inner(id, delete_file, true).await
+    /// 一次扫描统计删除前各路径的引用次数（供 `remove_all` 复用）。
+    async fn path_ref_counts(&self) -> PathRefCounts {
+        let mut counts = PathRefCounts::default();
+        for entry in self.entries() {
+            let state = entry.state.lock().await;
+            // 与 removable_paths_shared 一致：只有未完成的 HTTP 任务还在用临时文件。
+            let may_use_temp = state.kind == "http" && state.status != STATUS_DONE;
+            if may_use_temp {
+                PathRefCounts::bump(&mut counts.part, &state.part_path);
+                PathRefCounts::bump(&mut counts.cfg, &state.cfg_path);
+            }
+            PathRefCounts::bump(&mut counts.file, &state.filepath);
+        }
+        counts
     }
 
-    async fn remove_task_inner(&self, id: i64, delete_file: bool, save: bool) -> bool {
+    pub async fn remove_task(&self, id: i64, delete_file: bool) -> bool {
+        self.remove_task_inner(id, delete_file, true, None).await
+    }
+
+    async fn remove_task_inner(
+        &self,
+        id: i64,
+        delete_file: bool,
+        save: bool,
+        refs: Option<&PathRefCounts>,
+    ) -> bool {
         let entry = self.tasks.write().ok().and_then(|mut m| m.remove(&id));
         let Some(entry) = entry else {
             return false;
@@ -1477,9 +1582,17 @@ impl TaskManager {
                 state.cfg_path.clone(),
             )
         };
-        let (part_shared, cfg_shared, file_shared) = self
-            .removal_paths_shared(&part_path, &cfg_path, &filepath)
-            .await;
+        let (part_shared, cfg_shared, file_shared) = match refs {
+            Some(refs) => (
+                PathRefCounts::shared(&refs.part, &part_path),
+                PathRefCounts::shared(&refs.cfg, &cfg_path),
+                PathRefCounts::shared(&refs.file, &filepath),
+            ),
+            None => {
+                self.removal_paths_shared(&part_path, &cfg_path, &filepath)
+                    .await
+            }
+        };
         match kind.as_str() {
             "bt" => {
                 if let Some(engine) = self.bt_engine() {
@@ -1546,9 +1659,11 @@ impl TaskManager {
             .read()
             .map(|m| m.keys().copied().collect::<Vec<_>>())
             .unwrap_or_default();
+        // 引用计数在删除前建好：并发删除时共享同一份快照，避免 N 次全表扫描。
+        let refs = self.path_ref_counts().await;
         futures_util::future::join_all(
             ids.into_iter()
-                .map(|id| self.remove_task_inner(id, delete_file, false)),
+                .map(|id| self.remove_task_inner(id, delete_file, false, Some(&refs))),
         )
         .await;
         let _ = self.save_tasks().await;
@@ -2634,7 +2749,7 @@ impl TaskManager {
                     if failures >= 8 {
                         return Err(err.into());
                     }
-                    sleep(Duration::from_millis(1500)).await;
+                    sleep(retry_delay(index, failures)).await;
                     continue;
                 }
             };
@@ -2666,7 +2781,7 @@ impl TaskManager {
                     if failures >= 8 {
                         return Err(anyhow!("HTTP {}", status));
                     }
-                    sleep(Duration::from_millis(1500)).await;
+                    sleep(retry_delay(index, failures)).await;
                     continue;
                 }
                 return Err(anyhow!(
@@ -2744,7 +2859,7 @@ impl TaskManager {
                 if failures >= 8 {
                     return Err(err.into());
                 }
-                sleep(Duration::from_millis(1500)).await;
+                sleep(retry_delay(index, failures)).await;
                 continue 'outer;
             }
             let complete = {
@@ -2764,7 +2879,7 @@ impl TaskManager {
             if failures >= 8 {
                 return Err(anyhow!("分块 #{} 多次重试仍未完成", index));
             }
-            sleep(Duration::from_millis(1500)).await;
+            sleep(retry_delay(index, failures)).await;
         }
         Ok(())
     }
@@ -2883,7 +2998,7 @@ impl TaskManager {
                     if failures >= 8 {
                         return Err(err.into());
                     }
-                    sleep(Duration::from_millis(1500)).await;
+                    sleep(retry_delay(0, failures)).await;
                     continue;
                 }
             };
@@ -2913,7 +3028,7 @@ impl TaskManager {
                     if failures >= 8 {
                         return Err(anyhow!("HTTP {}", status));
                     }
-                    sleep(Duration::from_millis(1500)).await;
+                    sleep(retry_delay(0, failures)).await;
                     continue;
                 }
                 return Err(anyhow!("响应长度与预期不一致"));
@@ -3050,7 +3165,7 @@ impl TaskManager {
                 if failures >= 8 {
                     return Err(err.into());
                 }
-                sleep(Duration::from_millis(1500)).await;
+                sleep(retry_delay(0, failures)).await;
                 continue;
             }
             if let Some(total) = total {
@@ -3071,7 +3186,7 @@ impl TaskManager {
                 if failures >= 8 {
                     return Err(anyhow!("单流下载多次重试仍未完成"));
                 }
-                sleep(Duration::from_millis(1500)).await;
+                sleep(retry_delay(0, failures)).await;
                 continue;
             }
             break;
@@ -3280,6 +3395,40 @@ mod tests {
         match no_conflict {
             AddTaskResult::Added(snap) => assert_eq!(snap.filename, "other.bin"),
             other => panic!("expected unchanged filename, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unique_filename_skips_names_taken_by_disk_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = test_manager(
+            dir.path(),
+            serde_json::json!({
+                "defaultDir": dir.path().to_string_lossy(),
+                "fileConflictAction": 1,
+                "rememberFileConflictAction": true
+            }),
+        );
+        m.add_task_checked(&serde_json::json!({
+            "url": "https://example.com/a",
+            "filename": "x.bin",
+            "start": false
+        }))
+        .await
+        .unwrap();
+        // 磁盘已占用 "x (1).bin"：冲突重命名必须跳过它
+        std::fs::write(dir.path().join("x (1).bin"), b"").unwrap();
+        let second = m
+            .add_task_checked(&serde_json::json!({
+                "url": "https://example.com/b",
+                "filename": "x.bin",
+                "start": false
+            }))
+            .await
+            .unwrap();
+        match second {
+            AddTaskResult::Added(snap) => assert_eq!(snap.filename, "x (2).bin"),
+            other => panic!("expected renamed on conflict, got {other:?}"),
         }
     }
 
