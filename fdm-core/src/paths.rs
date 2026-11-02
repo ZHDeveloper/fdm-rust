@@ -43,6 +43,47 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 会被系统直接执行的扩展名。本地 API 的“打开路径”只用于打开下载结果，
+/// 不应成为执行任意程序的入口（含 UNC 远程路径）。
+const EXECUTABLE_EXTS: &[&str] = &[
+    "exe", "bat", "cmd", "com", "scr", "pif", "msi", "msp", "dll", "ps1", "psm1", "vbs", "vbe",
+    "js", "jse", "wsf", "wsh", "hta", "lnk", "url", "app", "sh", "command", "action", "workflow",
+    "jar", "reg",
+];
+
+/// 是否为 UNC / 网络路径（`\\host\share` 或 `//host/share`）。
+pub fn is_unc_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy().replace('/', "\\");
+    raw.starts_with("\\\\")
+}
+
+/// 是否为可被系统直接执行的脚本/程序。
+pub fn is_executable_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            EXECUTABLE_EXTS
+                .iter()
+                .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        })
+        .unwrap_or(false)
+}
+
+/// 本地“打开路径”接口可接受的路径：非 UNC、非可执行类型。
+pub fn is_safe_open_path(path: &Path) -> bool {
+    !is_unc_path(path) && !is_executable_path(path)
+}
+
+/// 种子文件读取接口可接受的路径：非 UNC 且扩展名为 .torrent。
+pub fn is_torrent_path(path: &Path) -> bool {
+    !is_unc_path(path)
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("torrent"))
+            .unwrap_or(false)
+}
+
 /// 将数据写入同目录临时文件，再原子替换目标文件。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -123,6 +164,38 @@ pub fn migrate_legacy_data(target_data_dir: &Path) -> Vec<String> {
         tracing::info!(?migrated, target = %target_data_dir.display(), "已迁移旧 FDM 数据");
     }
     migrated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unc_and_executable_paths() {
+        assert!(is_unc_path(Path::new(r"\\evil.example\share\a.exe")));
+        assert!(is_unc_path(Path::new("//evil.example/share/a.bin")));
+        assert!(!is_unc_path(Path::new(r"C:\Users\a\Downloads\a.bin")));
+
+        assert!(is_executable_path(Path::new("a.exe")));
+        assert!(is_executable_path(Path::new("a.BAT")));
+        assert!(is_executable_path(Path::new("setup.msi")));
+        assert!(!is_executable_path(Path::new("a.zip")));
+        assert!(!is_executable_path(Path::new("archive.tar.gz")));
+        assert!(!is_executable_path(Path::new("noext")));
+
+        assert!(is_safe_open_path(Path::new(r"C:\dl\movie.mkv")));
+        assert!(!is_safe_open_path(Path::new(r"\\evil.example\share\a.exe")));
+        assert!(!is_safe_open_path(Path::new(r"C:\dl\setup.exe")));
+    }
+
+    #[test]
+    fn torrent_path_requires_local_torrent_file() {
+        assert!(is_torrent_path(Path::new(r"C:\dl\ubuntu.torrent")));
+        assert!(is_torrent_path(Path::new(r"C:\dl\ubuntu.TORRENT")));
+        assert!(!is_torrent_path(Path::new(r"C:\dl\ubuntu.iso")));
+        assert!(!is_torrent_path(Path::new(r"\\evil.example\share\a.torrent")));
+        assert!(!is_torrent_path(Path::new(r"C:\dl\noext")));
+    }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {

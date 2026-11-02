@@ -20,6 +20,17 @@ use tauri_plugin_updater::{Updater, UpdaterExt};
 use url::Url;
 
 const BASE_URL: &str = "http://127.0.0.1:25432";
+
+/// 生成可安全嵌入 JS 源码的字符串字面量。
+///
+/// `serde_json::to_string` 的转义规则里 U+2028/U+2029 是普通字符，但它们在 JS
+/// 源码中是行终止符，直接放进 `eval` 的字符串会截断语句。
+fn js_string_literal(value: &str) -> Result<String> {
+    let encoded = serde_json::to_string(value)?;
+    Ok(encoded
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029"))
+}
 const UPDATE_ENDPOINT: &str =
     "https://github.com/ZHDeveloper/fdm-rust/releases/latest/download/latest.json";
 
@@ -268,10 +279,7 @@ impl DesktopHooks for TauriHooks {
             pairs.append_pair("reopen_ts", &ts);
         }
         if let Some(window) = self.app.get_webview_window("newdownload") {
-            let js = format!(
-                "window.location.href = {};",
-                serde_json::to_string(url.as_str())?
-            );
+            let js = format!("window.location.href = {};", js_string_literal(url.as_str())?);
             let _ = window.eval(&js);
             let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(520.0, 189.0)));
             let _ = window.unminimize();
@@ -295,10 +303,7 @@ impl DesktopHooks for TauriHooks {
         let mut url = Url::parse(&format!("{}/duplicate.html", BASE_URL))?;
         url.query_pairs_mut().append_pair("id", id);
         if let Some(window) = self.app.get_webview_window("duplicate") {
-            let js = format!(
-                "window.location.href = {};",
-                serde_json::to_string(url.as_str())?
-            );
+            let js = format!("window.location.href = {};", js_string_literal(url.as_str())?);
             let _ = window.eval(&js);
             let _ = window.set_title(title);
             let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(410.0, 185.0)));

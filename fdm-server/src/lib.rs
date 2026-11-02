@@ -15,6 +15,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use fdm_core::paths::{is_safe_open_path, is_torrent_path};
 use fdm_core::{github_proxy_candidates, has_sensitive_headers, SettingsStore, TaskSnapshot};
 use fdm_engine::{AddTaskResult, TaskManager};
 use fdm_platform::PlatformService;
@@ -112,12 +113,40 @@ pub struct ServerState {
     pub hooks: Arc<dyn DesktopHooks>,
     pub data_dir: PathBuf,
     /// 独立的重复下载询问窗口上下文：id -> {opts, duplicate, defaultAction, actions}
-    pub duplicate_requests: Arc<tokio::sync::Mutex<HashMap<String, Value>>>,
+    pub duplicate_requests: Arc<tokio::sync::Mutex<HashMap<String, DuplicateRequest>>>,
     pub duplicate_seq: Arc<AtomicU64>,
     /// 浏览器扩展最近一次访问状态接口的时间，用于判断扩展是否已连接
     pub last_browser_seen: Arc<Mutex<Option<Instant>>>,
     /// 一次性 Blob 上传票据，键为随机 Token
     pub blob_tickets: Arc<Mutex<HashMap<String, BlobTicket>>>,
+}
+
+/// 弹窗待处理请求。带创建时间：窗口被直接关闭时不会走 cancel，
+/// 没有时间戳就无法回收，条目（含自定义请求头）会一直驻留内存。
+#[derive(Clone)]
+pub struct DuplicateRequest {
+    pub created_at: Instant,
+    pub context: Value,
+}
+
+const DUPLICATE_TTL: Duration = Duration::from_secs(600);
+const DUPLICATE_LIMIT: usize = 64;
+
+/// 回收过期请求，并在数量超限时淘汰最旧的一批。
+fn prune_duplicate_requests(pending: &mut HashMap<String, DuplicateRequest>) {
+    pending.retain(|_, entry| entry.created_at.elapsed() < DUPLICATE_TTL);
+    let excess = pending.len().saturating_sub(DUPLICATE_LIMIT);
+    if excess == 0 {
+        return;
+    }
+    let mut oldest: Vec<(Instant, String)> = pending
+        .iter()
+        .map(|(id, entry)| (entry.created_at, id.clone()))
+        .collect();
+    oldest.sort_by_key(|(at, _)| *at);
+    for (_, id) in oldest.into_iter().take(excess) {
+        pending.remove(&id);
+    }
 }
 
 pub fn ensure_extension_assets(data_dir: &Path) -> Result<PathBuf> {
@@ -223,6 +252,28 @@ fn is_allowed_origin(origin: &str) -> bool {
         || origin.starts_with("moz-extension://")
 }
 
+/// 本机 UI（Tauri 窗口加载的页面）的 origin。
+fn is_local_ui_origin(origin: &str) -> bool {
+    origin == "http://127.0.0.1:25432" || origin == "http://localhost:25432"
+}
+
+/// 高风险端点：只有本机 UI 或无 Origin 的原生客户端可以调用。
+///
+/// 浏览器扩展需要创建下载任务，但用户可能装了任意第三方扩展，放行
+/// `chrome-extension://` 等于把“执行任意路径 / 退出应用 / 安装更新”也交出去。
+/// 这些端点对扩展一律拒绝（原生客户端不带 Origin，仍可正常调试）。
+/// 页面同源自带脚本/样式：禁外部脚本、禁 object/base，仅放行内联 style 与 data: 图片。
+/// 与 `tauri.conf.json` 的 `app.security.csp` 保持一致（扩展打开的窗口不走 Tauri 侧）。
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:25432 ws://localhost:25432; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
+const PRIVILEGED_ROUTE_PREFIXES: &[&str] = &[
+    "/api/system/open_path",
+    "/api/system/quit",
+    "/api/system/window",
+    "/api/system/probe_torrent",
+    "/api/update",
+];
+
 /// 只接受本机 Host 与受信 Origin（本机 UI / 浏览器扩展），阻断任意网页的 CSRF/DNS rebinding。
 async fn guard_local_request(req: Request, next: Next) -> Response {
     let host = req
@@ -243,6 +294,15 @@ async fn guard_local_request(req: Request, next: Next) -> Response {
         .headers()
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
+    let path = req.uri().path().to_string();
+    if !blob_ws
+        && PRIVILEGED_ROUTE_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        && !origin.map(is_local_ui_origin).unwrap_or(true)
+    {
+        return err_response(StatusCode::FORBIDDEN, "forbidden origin");
+    }
     if !blob_ws {
         if let Some(origin) = origin {
             if !is_allowed_origin(origin) && !trusted_extension {
@@ -275,9 +335,11 @@ async fn guard_local_request(req: Request, next: Next) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    // 页面全部脚本/样式都是同源自带，只放行内联 style 与 data: 图片；
+    // 扩展打开的窗口不走 Tauri 的 CSP，因此服务端也要下发同一策略。
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'"),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     response
 }
@@ -483,11 +545,17 @@ async fn open_prompt_window(state: &ServerState, body: Value) -> Response {
     } else {
         "重复的下载链接"
     };
-    state
-        .duplicate_requests
-        .lock()
-        .await
-        .insert(id.clone(), context);
+    {
+        let mut pending = state.duplicate_requests.lock().await;
+        prune_duplicate_requests(&mut pending);
+        pending.insert(
+            id.clone(),
+            DuplicateRequest {
+                created_at: Instant::now(),
+                context,
+            },
+        );
+    }
     match state.hooks.open_duplicate_dialog(&id, title).await {
         Ok(true) => Json(json!({"ok": true, "id": id, "opened": true, "action": "prefill_dialog"})).into_response(),
         Ok(false) => Json(json!({"ok": false, "id": id, "opened": false, "action": "prefill_dialog"})).into_response(),
@@ -506,7 +574,13 @@ async fn duplicate_context(
     State(state): State<ServerState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    match state.duplicate_requests.lock().await.get(&id).cloned() {
+    let context = state
+        .duplicate_requests
+        .lock()
+        .await
+        .get(&id)
+        .map(|entry| entry.context.clone());
+    match context {
         Some(context) => Json(context).into_response(),
         None => err_response(StatusCode::NOT_FOUND, "重复下载请求不存在或已处理"),
     }
@@ -517,9 +591,10 @@ async fn duplicate_submit(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    let Some(context) = state.duplicate_requests.lock().await.remove(&id) else {
+    let Some(entry) = state.duplicate_requests.lock().await.remove(&id) else {
         return err_response(StatusCode::NOT_FOUND, "重复下载请求不存在或已处理");
     };
+    let context = entry.context;
     let mut opts = context.get("opts").cloned().unwrap_or(json!({}));
     let kind = context
         .get("kind")
@@ -793,6 +868,10 @@ async fn probe_torrent(State(state): State<ServerState>, Json(body): Json<Value>
         return Json(json!({"ok": false, "error": "BT 引擎未启用"})).into_response();
     };
     let bytes = if let Some(path) = body.get("path").and_then(Value::as_str) {
+        // 种子读取只接受本地 .torrent：该接口会把任意文件内容读进内存并复制进数据目录。
+        if !is_torrent_path(Path::new(path)) {
+            return Json(json!({"ok": false, "error": "只支持本地 .torrent 文件"})).into_response();
+        }
         match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -913,13 +992,19 @@ async fn choose_save_as(State(state): State<ServerState>, Json(body): Json<Value
 }
 
 async fn open_path(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
-    let path = body
+    let raw = body
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // 打开路径会被系统按文件类型执行：拒绝 UNC 远程路径与可执行/脚本类型，
+    // 避免本地 API 变成“执行任意程序”的入口。
+    if !is_safe_open_path(Path::new(&raw)) {
+        tracing::warn!(path = %raw, "拒绝打开非本机或可执行路径");
+        return Json(json!({"ok": false, "error": "不支持打开该路径"})).into_response();
+    }
     let platform = state.platform.clone();
-    let ok = tokio::task::spawn_blocking(move || platform.open_path(Path::new(&path)))
+    let ok = tokio::task::spawn_blocking(move || platform.open_path(Path::new(&raw)))
         .await
         .unwrap_or(false);
     Json(json!({"ok": ok})).into_response()
@@ -1592,8 +1677,12 @@ fn spawn_completion_worker(state: ServerState) {
     tokio::spawn(async move {
         let mut handled: HashSet<i64> = HashSet::new();
         loop {
-            let Ok(event) = receiver.recv().await else {
-                continue;
+            let event = match receiver.recv().await {
+                Ok(event) => event,
+                // 发送端已释放：继续循环只会让这个任务 100% 占用一个 CPU 核。
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                // 消费不过来被跳过，立刻尝试接收下一条。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             };
             if event.event == "task:remove" {
                 if let Some(id) = event.data.get("id").and_then(Value::as_i64) {
@@ -2006,6 +2095,68 @@ mod tests {
         let (status, value) = json_response(&app, extension).await;
         assert_eq!(status, StatusCode::OK);
         assert!(value.get("defaultDir").is_some());
+    }
+
+    #[tokio::test]
+    async fn privileged_routes_reject_extension_origin() {
+        let (app, _platform, _hooks, _temp) = fixture();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/system/open_path")
+            .header("host", "127.0.0.1:25432")
+            .header("origin", "chrome-extension://abcdefghijklmnop")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"path":"C:\\Users\\a\\Downloads"}"#))
+            .unwrap();
+        let (status, _) = json_response(&app, request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // 本机 UI 仍可调用（路径本身是否合法由路径校验决定）
+        let ui = Request::builder()
+            .method("POST")
+            .uri("/api/system/open_path")
+            .header("host", "127.0.0.1:25432")
+            .header("origin", "http://127.0.0.1:25432")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"path":"C:\\Users\\a\\Downloads\\a.zip"}"#))
+            .unwrap();
+        let (status, _) = json_response(&app, ui).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn open_path_rejects_unc_and_executables() {
+        let (app, _platform, _hooks, _temp) = fixture();
+        for path in [
+            r"\\evil.example\share\payload.exe",
+            r"C:\Users\a\Downloads\setup.exe",
+            r"C:\Users\a\Downloads\run.bat",
+        ] {
+            let body = json!({ "path": path }).to_string();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/system/open_path")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let (status, value) = json_response(&app, request).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value["ok"], false, "应拒绝打开 {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_torrent_rejects_non_torrent_path() {
+        let (app, _platform, _hooks, _temp) = fixture();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/system/probe_torrent")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"path":"C:\\Users\\a\\secret.txt"}"#))
+            .unwrap();
+        let (status, value) = json_response(&app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["ok"], false);
     }
 
     #[tokio::test]
