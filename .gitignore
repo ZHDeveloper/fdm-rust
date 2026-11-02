@@ -1,5 +1,7 @@
 # Rust / Cargo 构建产物
 /target/
+# 主 target 被 dev 实例占用时另建的编译目录
+/target-review/
 **/*.rs.bk
 *.pdb
 
