@@ -32,6 +32,9 @@ screenshot-*.png
 *.swp
 *~
 
+# 本地 AI 工作区数据（WorkBuddy 记忆 / 会话缓存）
+.workbuddy/
+
 # 临时与备份文件
 *.bak
 *.bak*
