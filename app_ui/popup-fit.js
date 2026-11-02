@@ -31,11 +31,10 @@
     const foot = document.querySelector('.foot');
     if (!scroller || !foot) return;
 
-    const viewportHeight = document.documentElement.clientHeight || 0;
-    const frameHeight = Math.max(0, currentWinHeight - viewportHeight);
     const tabs = document.querySelector('.tabs');
     const tabsHeight = visible(tabs) ? tabs.getBoundingClientRect().height : 0;
-    const minHeight = opts.minHeight == null ? 200 : opts.minHeight;
+    // 窗口装饰（macOS 原生标题栏）由 Rust 侧 resize 时补偿，页面只需给出纯内容高度。
+    const minHeight = opts.minHeight == null ? 120 : opts.minHeight;
     const maxHeight = opts.maxHeight == null ? 850 : opts.maxHeight;
     // 内容区通常是 flex:1，当前窗口较高时 scrollHeight 会被可视高度撑满。
     // 临时按内容自然展开，才能测出真正的紧凑高度；分组框的 15px 底部留白不变。
@@ -56,7 +55,7 @@
     scroller.style.overflowY = prev.overflowY;
     const targetHeight = Math.max(
       minHeight,
-      Math.min(maxHeight, Math.ceil(tabsHeight + contentHeight + foot.offsetHeight + frameHeight)),
+      Math.min(maxHeight, Math.ceil(tabsHeight + contentHeight + foot.offsetHeight)),
     );
     const settleOverflow = (attempt) => {
       clearTimeout(fitPopupToContent.timer);
@@ -83,15 +82,13 @@
     return targetHeight;
   };
 
-  // 内容就绪后显示窗口：配合 Rust 侧 visible(false) 创建弹窗，
-  // 先完成收高再显示，消除首次打开的高度闪动。每页只执行一次。
-  window.showPopupOnce = function showPopupOnce(target, delay) {
+  // 显示由 Rust 侧 on_page_load 负责（隐藏窗口的 rAF 不会触发，页面定时器不可靠）。
+  // 此处仅作幂等确认，页面异常时多一次 show 请求也无害。
+  window.showPopupOnce = function showPopupOnce(target) {
     if (showPopupOnce.done) return;
     showPopupOnce.done = true;
-    setTimeout(() => {
-      if (window.api && typeof window.api.showWindow === 'function') {
-        window.api.showWindow(target);
-      }
-    }, delay == null ? 60 : delay);
+    if (window.api && typeof window.api.showWindow === 'function') {
+      window.api.showWindow(target);
+    }
   };
 })();

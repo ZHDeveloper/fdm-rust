@@ -35,8 +35,8 @@ function closeProgressWindow() {
 let fixedHeightApplied = false;
 function fitProgressPopup() {
   const target = taskId != null ? `prog_${taskId}` : 'progress';
-  // 窗口由 Rust 侧隐藏创建，固定高度校准后（本页为确定性 no-op）再显示
-  if (window.showPopupOnce) window.showPopupOnce(target, 30);
+  // 显示由 Rust 侧 on_page_load 负责；本页高度校准为确定性 no-op
+  if (window.showPopupOnce) window.showPopupOnce(target);
   if (fixedHeightApplied || !window.api || !window.fitPopupToContent || !document.body) return;
   const blocks = document.getElementById('blocks');
   const label = document.getElementById('blockLabel');

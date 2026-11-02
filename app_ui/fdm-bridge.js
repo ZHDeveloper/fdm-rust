@@ -234,11 +234,15 @@
     },
     resizeWindow: (target, width, height) => {
       const tgt = target || resolveCurrentTarget();
+      // 页面当前可视高度：原生层据此换算窗口装饰（macOS 原生标题栏）占用的高度，
+      // 保证传入的「内容区高度」在各平台都得到同样的可视区。
+      const viewport = document.documentElement ? document.documentElement.clientHeight : 0;
       return request('/api/system/window', 'POST', {
         action: 'resize',
         target: tgt,
         width,
-        height
+        height,
+        viewport,
       }).catch(() => {});
     },
     showWindow: (target) => {

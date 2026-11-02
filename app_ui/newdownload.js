@@ -279,16 +279,13 @@ function closeWindow() {
   }
 }
 $('#cancel').onclick = () => closeWindow();
-// 新建下载窗口当前逻辑高度（与 Tauri 创建窗口时的初始高度保持一致）
-let currentWinHeight = window.innerHeight || 257;
+// 新建下载窗口当前逻辑高度（页面内容区高度，与 Rust 创建窗口时的初始高度一致）
+let currentWinHeight = window.innerHeight || 179;
 
 function measureContentHeight() {
   const scroll = document.querySelector('.scroll');
   const foot = document.querySelector('.foot');
-  if (!scroll || !foot) return window.innerHeight || 257;
-  const viewportHeight = document.documentElement.clientHeight || 0;
-  // 逻辑窗口高度 - 页面可视高度 = 原生标题栏等非页面区域占用的高度
-  const frameHeight = Math.max(0, currentWinHeight - viewportHeight);
+  if (!scroll || !foot) return window.innerHeight || 179;
   // .scroll 是 flex:1，直接读 scrollHeight 会被当前可视高度撑满，
   // 收起内容时无法得到真实内容高度。这里临时改为按内容撑开再测量。
   const prevFlex = scroll.style.flex;
@@ -301,38 +298,27 @@ function measureContentHeight() {
   scroll.style.flex = prevFlex;
   scroll.style.height = prevHeight;
   scroll.style.overflowY = prevOverflow;
-  return Math.ceil(contentHeight + foot.offsetHeight + frameHeight);
-}
-
-// 窗口由 Rust 侧隐藏创建：内容收高并复校完成后再显示，消除首开闪动（每页一次）
-let newdownloadShown = false;
-function showNewdownloadWindow() {
-  if (newdownloadShown) return;
-  newdownloadShown = true;
-  setTimeout(() => {
-    if (window.api && typeof window.api.showWindow === 'function') {
-      window.api.showWindow('newdownload');
-    }
-  }, 40);
+  // 窗口装饰（macOS 原生标题栏）由 Rust 侧 resize 时补偿，这里只算纯内容高度。
+  return Math.ceil(contentHeight + foot.offsetHeight);
 }
 
 function applyAdaptiveHeight() {
   if (!(window.api && window.api.resizeWindow)) return;
-  const targetHeight = Math.max(180, Math.min(850, measureContentHeight()));
+  const targetHeight = Math.max(150, Math.min(850, measureContentHeight()));
   currentWinHeight = targetHeight;
   window.api.resizeWindow('newdownload', 520, targetHeight).then((res) => {
     if (res && res.height) currentWinHeight = res.height;
   }).catch(() => {});
-  // 窗口尺寸变化后滚动条/换行可能微调，再校正一次
-  setTimeout(() => {
-    showNewdownloadWindow();
+  // 窗口尺寸变化后滚动条/换行可能微调，再校正一次。
+  // 显示由 Rust 侧 on_page_load 负责，此处不再挂任何显示定时器。
+  requestAnimationFrame(() => {
     if (!(window.api && window.api.resizeWindow)) return;
-    const refined = Math.max(180, Math.min(850, measureContentHeight()));
+    const refined = Math.max(150, Math.min(850, measureContentHeight()));
     if (Math.abs(refined - currentWinHeight) > 2) {
       currentWinHeight = refined;
       window.api.resizeWindow('newdownload', 520, refined);
     }
-  }, 180);
+  });
 }
 
 $('#toggleAdvanced').onclick = () => {
@@ -341,8 +327,9 @@ $('#toggleAdvanced').onclick = () => {
   // 弹窗高度随高级选项的显示/隐藏自动适配
   requestAnimationFrame(applyAdaptiveHeight);
 };
-// 首次打开（含无 prefill 场景）按实际内容校正窗口高度
-requestAnimationFrame(applyAdaptiveHeight);
+// 首次打开（含无 prefill 场景）同步校正窗口高度。
+// 隐藏窗口的 requestAnimationFrame 不会触发，不能用它承载首次自适应。
+applyAdaptiveHeight();
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id !== 'urlBox') $('#start').click();

@@ -21,6 +21,61 @@ use url::Url;
 
 const BASE_URL: &str = "http://127.0.0.1:25432";
 
+/// macOS 的 `set_size` / `inner_size` 是「含原生标题栏的窗口尺寸」，
+/// WKWebView 的实际可视区比它少一个标题栏高度（实测 28 逻辑 px）；
+/// Windows 的 `set_size` 直接作用于内容区，页面可视高度等于传入值。
+/// 弹窗统一按「内容区高度」计算，这里把标题栏补回去，保证两端一致。
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_HEIGHT: f64 = 28.0;
+
+fn default_window_chrome() -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        MACOS_TITLEBAR_HEIGHT
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0.0
+    }
+}
+
+/// 实测「窗口逻辑高度 - 页面可视高度」，避免不同标题栏样式下硬编码失效。
+fn window_chrome_height(window: &tauri::WebviewWindow<tauri::Wry>, viewport: Option<f64>) -> f64 {
+    let Some(viewport) = viewport.filter(|v| *v > 0.0) else {
+        return default_window_chrome();
+    };
+    let Some(scale) = window.scale_factor().ok().filter(|s| *s > 0.0) else {
+        return default_window_chrome();
+    };
+    let Ok(inner) = window.inner_size() else {
+        return default_window_chrome();
+    };
+    let chrome = (inner.height as f64 / scale) - viewport;
+    // 只接受合理的「标题栏/边框」差值，异常数据退回平台默认值。
+    if (0.0..=80.0).contains(&chrome) {
+        chrome
+    } else {
+        default_window_chrome()
+    }
+}
+
+/// 各弹窗默认态的紧凑内容区高度（逻辑 px，含 tabs / 底栏，实测值）。
+/// 窗口创建时直接用该高度，首帧就贴合内容，避免「先按过大的固定高度显示、
+/// 再由页面收高」造成的空白与闪动；页面侧自适应只负责内容变化后的微调。
+mod popup_height {
+    pub const PROGRESS: f64 = 367.0;
+    pub const NEW_DOWNLOAD: f64 = 179.0;
+    pub const SETTINGS: f64 = 288.0;
+    pub const DUPLICATE: f64 = 124.0;
+    pub const EXTENSION_GUIDE: f64 = 362.0;
+}
+
+/// 弹窗创建/复用时的初始高度：macOS 需要额外预留标题栏，
+/// 否则页面 fit 之前（或兜底显示时）内容会被裁掉。
+fn initial_popup_height(height: f64) -> f64 {
+    height + default_window_chrome()
+}
+
 /// 生成可安全嵌入 JS 源码的字符串字面量。
 ///
 /// `serde_json::to_string` 的转义规则里 U+2028/U+2029 是普通字符，但它们在 JS
@@ -109,26 +164,41 @@ impl TauriHooks {
         let parsed = Url::parse(&url)?;
         let mut builder = WebviewWindowBuilder::new(&self.app, label, WebviewUrl::External(parsed))
             .title(title)
-            .inner_size(width, height)
+            .inner_size(width, initial_popup_height(height))
             .resizable(resizable)
             .visible(false)
-            .center();
+            .center()
+            // 页面加载完成即显示。隐藏的 WKWebView 不会触发 requestAnimationFrame，
+            // 因此不能依赖页面 JS 的定时器/回调来通知显示（旧逻辑只能等 1.2s 兜底）。
+            // on_page_load 由 WebView 导航回调驱动，与窗口是否可见无关。
+            .on_page_load(|window, payload| {
+                if matches!(
+                    payload.event(),
+                    tauri::webview::PageLoadEvent::Finished
+                ) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            });
         if label.starts_with("prog_") {
             builder = builder.min_inner_size(460.0, 280.0);
         }
         let window = builder.build()?;
-        // 弹窗先隐藏创建：页面完成高度自适应后通过 show 窗口操作再显示，
-        // 消除首次打开"先按初始高度显示再收高"的闪动；
-        // 页面异常未调用 show 时，由兜底线程最迟 1.2s 后强制显示。
-        Self::show_later(&window, 1200);
+        // 初始高度已按内容紧凑值设置，显示后页面再做一次自适应微调（差异接近 0）。
+        // 兜底线程仅用于页面异常未触发 on_page_load 的情况。
+        Self::show_later(&window, 500);
         Ok(true)
     }
 
-    /// 延迟显示窗口（兜底）。正常流程由页面在收高完成后主动调用 show 窗口操作。
+    /// 延迟显示窗口（兜底）。正常流程由 on_page_load 在加载完成时立即显示。
     fn show_later(window: &tauri::WebviewWindow<tauri::Wry>, ms: u64) {
         let win = window.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(ms));
+            // 已由 on_page_load 显示时不再重复 show/set_focus，避免抢焦点。
+            if win.is_visible().unwrap_or(false) {
+                return;
+            }
             let _ = win.show();
             let _ = win.set_focus();
         });
@@ -212,9 +282,16 @@ impl DesktopHooks for TauriHooks {
             .map(|t| format!("{} - 下载进度", t.filename))
             .unwrap_or_else(|| format!("任务 #{} - 下载进度", task_id));
         let url = format!("{}/progress.html?taskId={}", BASE_URL, task_id);
-        // 固定高度：按「收起细节 + 显示分块进度」的内容高度（实测 367 逻辑px，
-        // 已钉死全部行高使其与字体度量无关），打开后 JS 校准为 no-op，全程零 resize。
-        self.create_window(&label, url, &title, 540.0, 367.0, true)
+        // 固定高度：按「收起细节 + 显示分块进度」的内容高度，
+        // 已钉死全部行高使其与字体度量无关，打开后 JS 校准为 no-op，全程零 resize。
+        self.create_window(
+            &label,
+            url,
+            &title,
+            540.0,
+            popup_height::PROGRESS,
+            true,
+        )
     }
 
     async fn open_settings(&self) -> Result<bool> {
@@ -226,7 +303,7 @@ impl DesktopHooks for TauriHooks {
             format!("{}/settings.html", BASE_URL),
             "FDM - 设置选项",
             520.0,
-            400.0,
+            popup_height::SETTINGS,
             false,
         )
     }
@@ -240,7 +317,7 @@ impl DesktopHooks for TauriHooks {
             format!("{}/extension-guide.html", BASE_URL),
             "FDM - 安装浏览器扩展",
             560.0,
-            400.0,
+            popup_height::EXTENSION_GUIDE,
             false,
         )?;
         if opened {
@@ -281,12 +358,14 @@ impl DesktopHooks for TauriHooks {
         if let Some(window) = self.app.get_webview_window("newdownload") {
             let js = format!("window.location.href = {};", js_string_literal(url.as_str())?);
             let _ = window.eval(&js);
-            let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(520.0, 189.0)));
+            let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(
+                520.0,
+                initial_popup_height(popup_height::NEW_DOWNLOAD),
+            )));
             let _ = window.unminimize();
-            // 复用时同样先隐藏，页面重新加载并收高后由页面主动 show，
-            // 避免 185/189 → 内容高度的可见闪动
+            // 复用时先隐藏，导航完成后由 on_page_load 立即显示，避免旧内容闪动。
             let _ = window.hide();
-            Self::show_later(&window, 1200);
+            Self::show_later(&window, 500);
             return Ok(true);
         }
         self.create_window(
@@ -294,7 +373,7 @@ impl DesktopHooks for TauriHooks {
             url.to_string(),
             "下载文件信息",
             520.0,
-            189.0,
+            popup_height::NEW_DOWNLOAD,
             false,
         )
     }
@@ -306,14 +385,24 @@ impl DesktopHooks for TauriHooks {
             let js = format!("window.location.href = {};", js_string_literal(url.as_str())?);
             let _ = window.eval(&js);
             let _ = window.set_title(title);
-            let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(410.0, 185.0)));
+            let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(
+                410.0,
+                initial_popup_height(popup_height::DUPLICATE),
+            )));
             let _ = window.unminimize();
-            // 复用时先隐藏，页面重新加载并收高后由页面主动 show
+            // 复用时先隐藏，导航完成后由 on_page_load 立即显示
             let _ = window.hide();
-            Self::show_later(&window, 1200);
+            Self::show_later(&window, 500);
             return Ok(true);
         }
-        self.create_window("duplicate", url.to_string(), title, 410.0, 185.0, false)
+        self.create_window(
+            "duplicate",
+            url.to_string(),
+            title,
+            410.0,
+            popup_height::DUPLICATE,
+            false,
+        )
     }
 
     async fn close_progress(&self, task_id: i64) -> Result<bool> {
@@ -504,10 +593,15 @@ impl DesktopHooks for TauriHooks {
                     .get("height")
                     .and_then(Value::as_f64)
                     .unwrap_or(420.0);
+                // 页面传入的是「内容区高度」；macOS 的 set_size 会把原生标题栏也算进去，
+                // 因此补上实测的窗口装饰差值，保证页面可视高度与 Windows 一致。
+                let viewport = params.get("viewport").and_then(Value::as_f64);
+                let applied = height + window_chrome_height(&window, viewport);
                 let ok = window
-                    .set_size(tauri::Size::Logical(LogicalSize::new(width, height)))
+                    .set_size(tauri::Size::Logical(LogicalSize::new(width, applied)))
                     .is_ok();
-                json!({"ok": ok, "width": width, "height": height})
+                // height 返回页面请求的内容区高度，供 JS 继续按内容区记账。
+                json!({"ok": ok, "width": width, "height": height, "applied": applied})
             }
             "show" => {
                 let ok = window.show().is_ok();

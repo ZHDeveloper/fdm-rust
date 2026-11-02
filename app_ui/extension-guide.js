@@ -117,13 +117,13 @@ function fitWindow() {
   if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('extension_guide', 560));
 }
 
-// 首次打开时先用固定内容高度，避免窗口先按 400px 显示再收缩。
-if (window.fitPopupToContent) window.fitPopupToContent('extension_guide', 560, { initialHeight: 400 });
+// 窗口初始高度已由 Rust 按紧凑内容高度设置，首次同步校正即可。
+if (window.fitPopupToContent) window.fitPopupToContent('extension_guide', 560);
 // 状态检测完成后内容高度可能变化，再校正一次。
 setTimeout(fitWindow, 220);
 
 if ($('#browserSelect')) $('#browserSelect').addEventListener('change', fitWindow);
-// 窗口隐藏创建：首次检测完成、内容高度定型后再显示（异常时由 Rust 兜底显示）
+// 显示由 Rust 侧 on_page_load 负责；此处仅作幂等确认。
 refreshInfo()
   .then(fitWindow)
   .catch(() => {})
