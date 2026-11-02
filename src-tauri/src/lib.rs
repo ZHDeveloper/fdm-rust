@@ -187,7 +187,9 @@ impl DesktopHooks for TauriHooks {
             .map(|t| format!("{} - 下载进度", t.filename))
             .unwrap_or_else(|| format!("任务 #{} - 下载进度", task_id));
         let url = format!("{}/progress.html?taskId={}", BASE_URL, task_id);
-        self.create_window(&label, url, &title, 540.0, 360.0, true)
+        // 固定高度：按「收起细节 + 显示分块进度」的内容高度（实测 367 逻辑px，
+        // 已钉死全部行高使其与字体度量无关），打开后 JS 校准为 no-op，全程零 resize。
+        self.create_window(&label, url, &title, 540.0, 367.0, true)
     }
 
     async fn open_settings(&self) -> Result<bool> {

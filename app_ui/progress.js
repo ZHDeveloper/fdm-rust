@@ -29,10 +29,33 @@ function closeProgressWindow() {
   }
 }
 
+// 固定高度：按「收起细节 + 显示分块进度」的自然内容高度一次性设定，
+// 之后不再变化——显示细节（线程表在固定高度内滚动）、下载刷新、
+// 单连接（无分块进度，预留同样空间）都保持同一高度。
+let fixedHeightApplied = false;
 function fitProgressPopup() {
-  if (window.fitPopupToContent) {
-    requestAnimationFrame(() => window.fitPopupToContent(`prog_${taskId}`, 540));
-  }
+  if (fixedHeightApplied || !window.api || !window.fitPopupToContent || !document.body) return;
+  const target = taskId != null ? `prog_${taskId}` : 'progress';
+  const blocks = document.getElementById('blocks');
+  const label = document.getElementById('blockLabel');
+  const threads = document.querySelector('.sec-threads');
+  // 记录真实显示状态，测量后恢复（P2P/单连接会隐藏分块区，测量时强制显示）
+  const prev = {
+    cls: document.body.className,
+    blocks: blocks && blocks.style.display,
+    label: label && label.style.display,
+    threads: threads && threads.style.display,
+  };
+  document.body.classList.add('details-hidden');
+  if (blocks) blocks.style.display = '';
+  if (label) label.style.display = '';
+  if (threads) threads.style.display = 'none';
+  window.fitPopupToContent(target, 540, { minHeight: 300, maxHeight: 850 });
+  document.body.className = prev.cls;
+  if (blocks) blocks.style.display = prev.blocks;
+  if (label) label.style.display = prev.label;
+  if (threads) threads.style.display = prev.threads;
+  fixedHeightApplied = true;
 }
 
 function fmtSize(b) {
@@ -326,7 +349,7 @@ $('#toggleDetails').onclick = () => {
   document.body.classList.toggle('details-hidden');
   $('#toggleDetails').textContent = document.body.classList.contains('details-hidden') ? '>> 显示细节' : '<< 隐藏细节';
   if (!document.body.classList.contains('details-hidden')) setTimeout(drawBlocks, 0);
-  fitProgressPopup();
+  // 固定高度：切换细节不改窗口大小，线程表在面板内滚动
 };
 
 window.addEventListener('resize', () => { if (snap) drawBlocks(); });

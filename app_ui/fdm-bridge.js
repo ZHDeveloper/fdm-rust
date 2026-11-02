@@ -563,7 +563,7 @@
         if (res && res.opened) return true;
       } catch (_) {}
       try {
-        const w = window.open(`progress.html?taskId=${tid}`, `fdm_prog_${tid}`, getCenteredPopupFeatures(680, 430));
+        const w = window.open(`progress.html?taskId=${tid}`, `fdm_prog_${tid}`, getCenteredPopupFeatures(540, 460));
         return !!w;
       } catch (_) {
         return false;
