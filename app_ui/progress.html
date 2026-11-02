@@ -46,9 +46,8 @@
     background: #fff; display: block; }
 
   /* 线程明细表 */
-  /* 固定表头 + 8 行的高度：窗口高度以“线程明细展开”时的尺寸为准，
-     线程数变化或切换细节都不会让弹窗高度跳动，超出 8 行才在表内滚动 */
-  .threads { border: 0.5px solid rgba(0,0,0,0.12); border-radius: 4px; overflow-y: auto; overflow-x: hidden; height: 220px; background: #fff; }
+  /* 高度恰好容纳表头 + 8 行：<=8 行时容器自适应不滚动，超过 8 行才出现纵向滚动 */
+  .threads { border: 0.5px solid rgba(0,0,0,0.12); border-radius: 4px; overflow-y: auto; overflow-x: hidden; max-height: 220px; background: #fff; }
   table { width: 100%; border-collapse: collapse; font-size: 11px; }
   thead th { position: sticky; top: 0; z-index: 1; background: #f0f0f0; border-bottom: 0.5px solid rgba(0,0,0,0.16);
     text-align: left; padding: 0 7px; height: 24px; line-height: 24px; color: #1a1a1a; font-weight: 400;
@@ -120,6 +119,6 @@
 
   <script src="fdm-bridge.js"></script>
   <script src="popup-fit.js?v=2026103001"></script>
-  <script src="progress.js?v=2026110205"></script>
+  <script src="progress.js?v=2026110201"></script>
 </body>
 </html>

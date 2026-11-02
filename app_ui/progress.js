@@ -30,20 +30,9 @@ function closeProgressWindow() {
 }
 
 function fitProgressPopup() {
-  if (!window.fitPopupToContent) return;
-  // taskId 未就绪时 resize 目标（prog_null）不生效，还会污染 popup-fit 的高度缓存，直接等 onProgressInit 再收高。
-  if (taskId == null) return;
-  // 窗口高度统一按“隐藏细节（紧凑）态”的尺寸计算并固定：
-  // 展开细节不再改变窗口高度，多出来的线程明细在面板内部滚动。
-  requestAnimationFrame(() => {
-    const body = document.body;
-    const expanded = !body.classList.contains('details-hidden');
-    if (expanded) body.classList.add('details-hidden');
-    // 始终用实时窗口高度做基准：popup-fit 缓存的上次目标高度可能因 resize 未生效而失真，
-    // 会把假“边框补偿”累加进目标高度（表现为弹窗被撑出一大截空白）。
-    window.fitPopupToContent(`prog_${taskId}`, 540, { initialHeight: window.innerHeight });
-    if (expanded) body.classList.remove('details-hidden');
-  });
+  if (window.fitPopupToContent) {
+    requestAnimationFrame(() => window.fitPopupToContent(`prog_${taskId}`, 540));
+  }
 }
 
 function fmtSize(b) {
@@ -337,8 +326,7 @@ $('#toggleDetails').onclick = () => {
   document.body.classList.toggle('details-hidden');
   $('#toggleDetails').textContent = document.body.classList.contains('details-hidden') ? '>> 显示细节' : '<< 隐藏细节';
   if (!document.body.classList.contains('details-hidden')) setTimeout(drawBlocks, 0);
-  // 窗口高度固定为紧凑态，展开细节只让面板内部滚动，不再触发重新收高
-  // （popup-fit 的 overflow 补偿会把窗口重新撑高）。
+  fitProgressPopup();
 };
 
 window.addEventListener('resize', () => { if (snap) drawBlocks(); });
