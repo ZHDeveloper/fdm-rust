@@ -82,15 +82,14 @@ pub fn parse_magnet(link: &str) -> Option<MagnetInfo> {
                     info.name = Some(value.trim().to_string());
                 }
             }
-            "xl" => {
-                if info.size.is_none() {
+            "xl"
+                if info.size.is_none() => {
                     if let Ok(size) = value.trim().parse::<u64>() {
                         if size > 0 {
                             info.size = Some(size);
                         }
                     }
                 }
-            }
             _ => {}
         }
     }

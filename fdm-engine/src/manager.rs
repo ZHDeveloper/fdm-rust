@@ -252,9 +252,7 @@ impl TaskManager {
     }
 
     async fn create_ed2k_engine(&self, amule_dir: Option<PathBuf>) -> Option<Arc<Ed2kEngine>> {
-        let Some(dir) = amule_dir else {
-            return None;
-        };
+        let dir = amule_dir?;
         match Ed2kEngine::new(&self.data_dir, self.settings.clone(), dir).await {
             Ok(engine) => Some(engine),
             Err(err) => {
@@ -2732,8 +2730,8 @@ impl TaskManager {
                 return Ok(());
             }
             if let Some(err) = stream_error {
-                if failures >= 1 {
-                    if Self::advance_proxy_candidate(
+                if failures >= 1
+                    && Self::advance_proxy_candidate(
                         &candidate_index,
                         candidates.as_slice(),
                         used_index,
@@ -2742,7 +2740,6 @@ impl TaskManager {
                         failures = 0;
                         continue 'outer;
                     }
-                }
                 failures += 1;
                 if failures >= 8 {
                     return Err(err.into());
@@ -3039,8 +3036,8 @@ impl TaskManager {
                 return Ok(());
             }
             if let Some(err) = stream_error {
-                if failures >= 1 {
-                    if Self::advance_proxy_candidate(
+                if failures >= 1
+                    && Self::advance_proxy_candidate(
                         &candidate_index,
                         candidates.as_slice(),
                         used_index,
@@ -3049,7 +3046,6 @@ impl TaskManager {
                         failures = 0;
                         continue;
                     }
-                }
                 failures += 1;
                 if failures >= 8 {
                     return Err(err.into());
@@ -3061,8 +3057,8 @@ impl TaskManager {
                 if offset >= total {
                     break;
                 }
-                if failures >= 1 {
-                    if Self::advance_proxy_candidate(
+                if failures >= 1
+                    && Self::advance_proxy_candidate(
                         &candidate_index,
                         candidates.as_slice(),
                         used_index,
@@ -3071,7 +3067,6 @@ impl TaskManager {
                         failures = 0;
                         continue;
                     }
-                }
                 failures += 1;
                 if failures >= 8 {
                     return Err(anyhow!("单流下载多次重试仍未完成"));

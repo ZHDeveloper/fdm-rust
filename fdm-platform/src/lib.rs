@@ -100,7 +100,7 @@ impl PlatformService for SystemPlatform {
     fn message_box(&self, title: &str, message: &str, kind: &str, confirm: bool) -> bool {
         #[cfg(windows)]
         {
-            return show_message_box(title, message, kind, confirm);
+            show_message_box(title, message, kind, confirm)
         }
         #[cfg(not(windows))]
         {
@@ -344,10 +344,10 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
                 }
                 Err(_) => ok = false,
             }
-            if let Ok((key, _)) = hkcu.create_subkey(&join_key(&prog_path, "DefaultIcon")) {
+            if let Ok((key, _)) = hkcu.create_subkey(join_key(&prog_path, "DefaultIcon")) {
                 ok &= key.set_value("", &icon).is_ok();
             }
-            if let Ok((key, _)) = hkcu.create_subkey(&join_key(&prog_path, r"shell\open\command")) {
+            if let Ok((key, _)) = hkcu.create_subkey(join_key(&prog_path, r"shell\open\command")) {
                 ok &= key.set_value("", &command).is_ok();
             }
 
@@ -372,10 +372,10 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
             }
             Err(_) => ok = false,
         }
-        if let Ok((key, _)) = hkcu.create_subkey(&join_key(&torrent_prog, "DefaultIcon")) {
+        if let Ok((key, _)) = hkcu.create_subkey(join_key(&torrent_prog, "DefaultIcon")) {
             ok &= key.set_value("", &icon).is_ok();
         }
-        if let Ok((key, _)) = hkcu.create_subkey(&join_key(&torrent_prog, r"shell\open\command")) {
+        if let Ok((key, _)) = hkcu.create_subkey(join_key(&torrent_prog, r"shell\open\command")) {
             ok &= key.set_value("", &command).is_ok();
         }
 
@@ -385,14 +385,14 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
             Ok((key, _)) => {
                 ok &= key.set_value("", &"FDM.torrent").is_ok();
                 if let Ok((progids, _)) =
-                    hkcu.create_subkey(&join_key(&ext_path, "OpenWithProgids"))
+                    hkcu.create_subkey(join_key(&ext_path, "OpenWithProgids"))
                 {
                     ok &= progids.set_value("FDM.torrent", &"").is_ok();
                 }
             }
             Err(_) => ok = false,
         }
-        if let Ok((key, _)) = hkcu.create_subkey(&join_key(
+        if let Ok((key, _)) = hkcu.create_subkey(join_key(
             base,
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.torrent\OpenWithProgids",
         )) {
@@ -404,10 +404,10 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
         match hkcu.create_subkey(&app_key) {
             Ok((key, _)) => {
                 ok &= key.set_value("FriendlyAppName", &"FDM").is_ok();
-                if let Ok((types, _)) = hkcu.create_subkey(&join_key(&app_key, "SupportedTypes")) {
+                if let Ok((types, _)) = hkcu.create_subkey(join_key(&app_key, "SupportedTypes")) {
                     ok &= types.set_value(".torrent", &"").is_ok();
                 }
-                if let Ok((cmd, _)) = hkcu.create_subkey(&join_key(&app_key, r"shell\open\command"))
+                if let Ok((cmd, _)) = hkcu.create_subkey(join_key(&app_key, r"shell\open\command"))
                 {
                     ok &= cmd.set_value("", &command).is_ok();
                 }
@@ -425,12 +425,12 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
                     .is_ok();
                 ok &= key.set_value("ApplicationIcon", &icon).is_ok();
                 if let Ok((file_assoc, _)) =
-                    hkcu.create_subkey(&join_key(&capabilities, "FileAssociations"))
+                    hkcu.create_subkey(join_key(&capabilities, "FileAssociations"))
                 {
                     ok &= file_assoc.set_value(".torrent", &"FDM.torrent").is_ok();
                 }
                 if let Ok((url_assoc, _)) =
-                    hkcu.create_subkey(&join_key(&capabilities, "URLAssociations"))
+                    hkcu.create_subkey(join_key(&capabilities, "URLAssociations"))
                 {
                     ok &= url_assoc.set_value("magnet", &"FDM.magnet").is_ok();
                     ok &= url_assoc.set_value("ed2k", &"FDM.ed2k").is_ok();
@@ -439,7 +439,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
             Err(_) => ok = false,
         }
         if let Ok((key, _)) =
-            hkcu.create_subkey(&join_key(base, r"Software\RegisteredApplications"))
+            hkcu.create_subkey(join_key(base, r"Software\RegisteredApplications"))
         {
             ok &= key.set_value("FDM", &r"Software\FDM\Capabilities").is_ok();
         }
@@ -471,7 +471,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
             }
         }
         if let Ok(key) = hkcu.open_subkey_with_flags(
-            &join_key(
+            join_key(
                 base,
                 r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.torrent\OpenWithProgids",
             ),
@@ -494,7 +494,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
             }
         }
         if let Ok(key) = hkcu.open_subkey_with_flags(
-            &join_key(base, r"Software\RegisteredApplications"),
+            join_key(base, r"Software\RegisteredApplications"),
             KEY_ALL_ACCESS,
         ) {
             match key.delete_value("FDM") {
