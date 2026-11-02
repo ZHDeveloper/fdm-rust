@@ -165,7 +165,22 @@ async fn handle(mut socket: TcpStream, state: ServerState) -> Result<()> {
     let status = resp.status().as_u16();
     let response_headers = resp.headers().clone();
 
-    if should_capture(status, &response_headers, &request.method) {
+    // 浏览器 Fetch Metadata：子资源请求（font/style/script/image 等）永远不是
+    // 用户主动下载。OpenWrt uhttpd 把 .woff2 按 application/octet-stream 提供，
+    // OpenClash 页面加载字体时就会被误捕为下载任务（返回 204 还会弄坏页面字体）。
+    let fetch_dest = request
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("sec-fetch-dest"))
+        .map(|(_, v)| v.trim().to_ascii_lowercase());
+
+    if should_capture(
+        status,
+        &response_headers,
+        &request.method,
+        fetch_dest.as_deref(),
+        request.url.path(),
+    ) {
         let disposition = response_headers
             .get(CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok());
@@ -193,15 +208,50 @@ async fn handle(mut socket: TcpStream, state: ServerState) -> Result<()> {
     .await
 }
 
-fn should_capture(status: u16, headers: &HeaderMap, method: &Method) -> bool {
+/// 网页静态资源扩展名。老服务器/路由器固件常把这些按
+/// application/octet-stream 提供；没有 Fetch Metadata 可用时按扩展名兜底，
+/// 避免把页面自身加载的资源捕获成下载任务。
+const WEB_ASSET_EXTS: &[&str] = &[
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".css", ".js", ".mjs", ".map", ".png", ".jpg",
+    ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif", ".bmp", ".webmanifest",
+];
+
+fn is_web_asset_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    WEB_ASSET_EXTS.iter().any(|ext| path.ends_with(ext))
+}
+
+fn should_capture(
+    status: u16,
+    headers: &HeaderMap,
+    method: &Method,
+    fetch_dest: Option<&str>,
+    url_path: &str,
+) -> bool {
     if !(200..300).contains(&status) {
         return false;
     }
+    // 浏览器只对导航请求做“渲染不了 → 下载”的判定：字体/脚本/图片等子资源
+    // 与 fetch/XHR（empty）永远不会变成浏览器下载，代理绝不截胡。
+    // <a download>、downloads API 等被放行的下载，浏览器照样创建下载项，
+    // 由扩展 onDeterminingFilename 接管，路径不丢。
+    // Fetch Metadata 缺失（老客户端）时改按静态资源扩展名兜底。
+    let web_asset = match fetch_dest {
+        Some(dest) => {
+            if !matches!(dest, "document" | "iframe") {
+                return false;
+            }
+            // 导航直达 octet-stream 资源时浏览器会真实下载，扩展名不拦截
+            false
+        }
+        None => is_web_asset_path(url_path),
+    };
     let disposition = headers
         .get(CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    // Content-Disposition 是服务端显式的下载意图，始终尊重。
     if disposition.contains("attachment") || disposition.contains("filename=") {
         return true;
     }
@@ -214,20 +264,23 @@ fn should_capture(status: u16, headers: &HeaderMap, method: &Method) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if matches!(
-        content_type.as_str(),
-        "application/x-targz"
-            | "application/x-gzip"
-            | "application/zip"
-            | "application/x-tar"
-            | "application/octet-stream"
-    ) {
+    if !web_asset
+        && matches!(
+            content_type.as_str(),
+            "application/x-targz"
+                | "application/x-gzip"
+                | "application/zip"
+                | "application/x-tar"
+                | "application/octet-stream"
+        )
+    {
         return true;
     }
     // POST 表单本身就可能是“生成并下载”的接口（路由器备份等），
     // 非文本响应即可视为文件，避免浏览器再下一次而卡在下载决策。
     if *method == Method::POST {
-        return !(content_type.is_empty()
+        return !(web_asset
+            || content_type.is_empty()
             || content_type.starts_with("text/")
             || content_type.contains("json")
             || content_type.contains("xml")
@@ -536,19 +589,77 @@ mod tests {
             CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment; filename=\"a.tar.gz\""),
         );
-        assert!(should_capture(200, &headers, &Method::GET));
-        assert!(!should_capture(403, &headers, &Method::GET));
+        assert!(should_capture(200, &headers, &Method::GET, None, "/a.tar.gz"));
+        assert!(!should_capture(403, &headers, &Method::GET, None, "/a.tar.gz"));
 
         let mut binary = HeaderMap::new();
         binary.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/x-targz"),
         );
-        assert!(should_capture(200, &binary, &Method::GET));
+        assert!(should_capture(200, &binary, &Method::GET, None, "/a.tar.gz"));
 
         let mut html = HeaderMap::new();
         html.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
-        assert!(!should_capture(200, &html, &Method::GET));
+        assert!(!should_capture(200, &html, &Method::GET, None, "/index.html"));
+    }
+
+    #[test]
+    fn skips_subresource_and_empty_fetches() {
+        // OpenClash 字体场景：uhttpd 把 .woff2 按 octet-stream 提供，
+        // 页面子资源加载绝不能被捕获成下载任务。
+        let mut binary = HeaderMap::new();
+        binary.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        let font_path = "/luci-static/resources/openclash/fonts/TwemojiMozilla-flags.woff2";
+        // 子资源：浏览器自己不会下载，代理放行
+        assert!(!should_capture(200, &binary, &Method::GET, Some("font"), font_path));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("style"), "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("script"), "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("image"), "/a.bin"));
+        // fetch/XHR/downloads API（empty）：交给浏览器下载项 + 扩展接管，代理不截胡
+        assert!(!should_capture(200, &binary, &Method::GET, Some("empty"), "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::POST, Some("empty"), "/a.bin"));
+        // 导航：浏览器会触发下载，代理捕获
+        assert!(should_capture(200, &binary, &Method::GET, Some("document"), "/a.bin"));
+        assert!(should_capture(200, &binary, &Method::GET, Some("iframe"), "/a.bin"));
+        // 导航直达 octet-stream 静态资源（地址栏输入字体 URL）：浏览器会下载，扩展名不拦截
+        assert!(should_capture(200, &binary, &Method::GET, Some("document"), font_path));
+        // 导航上的显式附件同样捕获
+        let mut attachment = HeaderMap::new();
+        attachment.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"f.woff2\""),
+        );
+        assert!(should_capture(200, &attachment, &Method::GET, Some("document"), font_path));
+    }
+
+    #[test]
+    fn skips_web_asset_extensions_without_fetch_metadata() {
+        // 无 Fetch Metadata（旧浏览器/非 Chromium）时按扩展名兜底。
+        let mut binary = HeaderMap::new();
+        binary.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        assert!(!should_capture(200, &binary, &Method::GET, None, "/fonts/TwemojiMozilla-flags.woff2"));
+        assert!(!should_capture(200, &binary, &Method::GET, None, "/static/app.JS?x=1".split('?').next().unwrap()));
+        assert!(!should_capture(200, &binary, &Method::GET, None, "/img/logo.PNG"));
+        // 真实下载文件不受影响
+        assert!(should_capture(200, &binary, &Method::GET, None, "/files/firmware.bin"));
+        assert!(should_capture(200, &binary, &Method::GET, None, "/backup.tar.gz"));
+        // 扩展名兜底不影响显式附件
+        let mut attachment = HeaderMap::new();
+        attachment.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"icon.svg\""),
+        );
+        assert!(should_capture(200, &attachment, &Method::GET, None, "/icon.svg"));
+        // POST 表单下载同样跳过静态资源路径
+        assert!(!should_capture(200, &binary, &Method::POST, None, "/fonts/a.woff2"));
+        assert!(should_capture(200, &binary, &Method::POST, None, "/cgi-backup"));
     }
 
     #[tokio::test]
