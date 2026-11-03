@@ -975,12 +975,93 @@ fn prefill_from_arg(raw: &str, cwd: Option<&str>) -> Option<Value> {
     None
 }
 
+/// 关闭或隐藏所有打开的 FDM 窗口（主窗口隐藏，子弹窗关闭），保留后台常驻运行。
+fn hide_fdm_windows(app: &tauri::AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label == "main" {
+            let _ = window.hide();
+        } else {
+            let _ = window.close();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let pkg_info = app.package_info();
+    let config = app.config();
+    let about_metadata = AboutMetadata {
+        name: Some(pkg_info.name.clone()),
+        version: Some(pkg_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let close_app_item = MenuItem::with_id(
+        app,
+        "mac_close",
+        "关闭 FDM",
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+
+    let app_menu = Submenu::with_items(
+        app,
+        pkg_info.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &close_app_item,
+        ],
+    )?;
+
+    let edit_menu = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let window_menu = Submenu::with_items(
+        app,
+        "窗口",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
+
 pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
 
-    let app = tauri::Builder::default()
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let Some(runtime) = app.try_state::<AppRuntime>() else {
@@ -1001,7 +1082,21 @@ pub fn run() {
                     }
                 }
             });
-        }))
+        }));
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .enable_macos_default_menu(false)
+            .menu(|app| build_macos_menu(app))
+            .on_menu_event(|app, event| {
+                if event.id().as_ref() == "mac_close" {
+                    hide_fdm_windows(app);
+                }
+            });
+    }
+
+    let app = builder
         .setup(|app| {
             let startup_payload = std::env::args()
                 .skip(1)
@@ -1199,17 +1294,28 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         #[cfg(target_os = "macos")]
-        handle_macos_run_event(app_handle, event);
+        handle_macos_run_event(app_handle, &event);
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (app_handle, event);
+            let _ = (app_handle, &event);
+        }
+
+        if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+            let quitting = app_handle
+                .try_state::<AppRuntime>()
+                .map(|s| s.quitting.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if !quitting {
+                api.prevent_exit();
+                hide_fdm_windows(app_handle);
+            }
         }
     });
 }
 
 /// macOS 通过 LaunchServices 把打开的链接或 .torrent 文件交给应用。
 #[cfg(target_os = "macos")]
-fn handle_macos_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+fn handle_macos_run_event(app_handle: &tauri::AppHandle, event: &tauri::RunEvent) {
     match event {
         tauri::RunEvent::Opened { urls } => {
             let Some(runtime) = app_handle.try_state::<AppRuntime>() else {
