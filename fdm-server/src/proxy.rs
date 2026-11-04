@@ -173,12 +173,23 @@ async fn handle(mut socket: TcpStream, state: ServerState) -> Result<()> {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("sec-fetch-dest"))
         .map(|(_, v)| v.trim().to_ascii_lowercase());
+    let accept = request
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+        .map(|(_, v)| v.trim());
+    let is_xhr = request.headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("x-requested-with")
+            && v.to_ascii_lowercase().contains("xmlhttprequest")
+    });
 
     if should_capture(
         status,
         &response_headers,
         &request.method,
         fetch_dest.as_deref(),
+        accept,
+        is_xhr,
         request.url.path(),
     ) {
         let disposition = response_headers
@@ -221,29 +232,48 @@ fn is_web_asset_path(path: &str) -> bool {
     WEB_ASSET_EXTS.iter().any(|ext| path.ends_with(ext))
 }
 
+fn is_navigation_request(
+    fetch_dest: Option<&str>,
+    accept: Option<&str>,
+    is_xhr: bool,
+) -> bool {
+    if let Some(dest) = fetch_dest {
+        return matches!(dest, "document" | "iframe");
+    }
+    if is_xhr {
+        return false;
+    }
+    match accept {
+        // 导航请求（地址栏、链接点击、表单提交）在所有主流浏览器中 Accept 头均必定包含 text/html。
+        // XHR / fetch 默认是 */* 或特定数据类型，不包含 text/html，代理绝不截胡。
+        Some(accept) => accept.to_ascii_lowercase().contains("text/html"),
+        None => true,
+    }
+}
+
 fn should_capture(
     status: u16,
     headers: &HeaderMap,
     method: &Method,
     fetch_dest: Option<&str>,
+    accept: Option<&str>,
+    is_xhr: bool,
     url_path: &str,
 ) -> bool {
     if !(200..300).contains(&status) {
         return false;
     }
     // 浏览器只对导航请求做“渲染不了 → 下载”的判定：字体/脚本/图片等子资源
-    // 与 fetch/XHR（empty）永远不会变成浏览器下载，代理绝不截胡。
+    // 与 fetch/XHR 永远不会变成浏览器下载，代理绝不截胡。
     // <a download>、downloads API 等被放行的下载，浏览器照样创建下载项，
     // 由扩展 onDeterminingFilename 接管，路径不丢。
-    // Fetch Metadata 缺失（老客户端）时改按静态资源扩展名兜底。
+    // 普通 HTTP 站点（如路由器 LuCI）无 Fetch Metadata，需结合 Accept 与 XHR 识别。
+    if !is_navigation_request(fetch_dest, accept, is_xhr) {
+        return false;
+    }
     let web_asset = match fetch_dest {
-        Some(dest) => {
-            if !matches!(dest, "document" | "iframe") {
-                return false;
-            }
-            // 导航直达 octet-stream 资源时浏览器会真实下载，扩展名不拦截
-            false
-        }
+        // 导航直达 octet-stream 资源时浏览器会真实下载，扩展名不拦截
+        Some(_) => false,
         None => is_web_asset_path(url_path),
     };
     let disposition = headers
@@ -589,19 +619,20 @@ mod tests {
             CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment; filename=\"a.tar.gz\""),
         );
-        assert!(should_capture(200, &headers, &Method::GET, None, "/a.tar.gz"));
-        assert!(!should_capture(403, &headers, &Method::GET, None, "/a.tar.gz"));
+        let nav = Some("text/html");
+        assert!(should_capture(200, &headers, &Method::GET, None, nav, false, "/a.tar.gz"));
+        assert!(!should_capture(403, &headers, &Method::GET, None, nav, false, "/a.tar.gz"));
 
         let mut binary = HeaderMap::new();
         binary.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/x-targz"),
         );
-        assert!(should_capture(200, &binary, &Method::GET, None, "/a.tar.gz"));
+        assert!(should_capture(200, &binary, &Method::GET, None, nav, false, "/a.tar.gz"));
 
         let mut html = HeaderMap::new();
         html.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
-        assert!(!should_capture(200, &html, &Method::GET, None, "/index.html"));
+        assert!(!should_capture(200, &html, &Method::GET, None, nav, false, "/index.html"));
     }
 
     #[test]
@@ -615,25 +646,25 @@ mod tests {
         );
         let font_path = "/luci-static/resources/openclash/fonts/TwemojiMozilla-flags.woff2";
         // 子资源：浏览器自己不会下载，代理放行
-        assert!(!should_capture(200, &binary, &Method::GET, Some("font"), font_path));
-        assert!(!should_capture(200, &binary, &Method::GET, Some("style"), "/a.bin"));
-        assert!(!should_capture(200, &binary, &Method::GET, Some("script"), "/a.bin"));
-        assert!(!should_capture(200, &binary, &Method::GET, Some("image"), "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("font"), None, false, font_path));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("style"), None, false, "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("script"), None, false, "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("image"), None, false, "/a.bin"));
         // fetch/XHR/downloads API（empty）：交给浏览器下载项 + 扩展接管，代理不截胡
-        assert!(!should_capture(200, &binary, &Method::GET, Some("empty"), "/a.bin"));
-        assert!(!should_capture(200, &binary, &Method::POST, Some("empty"), "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::GET, Some("empty"), None, false, "/a.bin"));
+        assert!(!should_capture(200, &binary, &Method::POST, Some("empty"), None, false, "/a.bin"));
         // 导航：浏览器会触发下载，代理捕获
-        assert!(should_capture(200, &binary, &Method::GET, Some("document"), "/a.bin"));
-        assert!(should_capture(200, &binary, &Method::GET, Some("iframe"), "/a.bin"));
+        assert!(should_capture(200, &binary, &Method::GET, Some("document"), Some("text/html"), false, "/a.bin"));
+        assert!(should_capture(200, &binary, &Method::GET, Some("iframe"), Some("text/html"), false, "/a.bin"));
         // 导航直达 octet-stream 静态资源（地址栏输入字体 URL）：浏览器会下载，扩展名不拦截
-        assert!(should_capture(200, &binary, &Method::GET, Some("document"), font_path));
+        assert!(should_capture(200, &binary, &Method::GET, Some("document"), Some("text/html"), false, font_path));
         // 导航上的显式附件同样捕获
         let mut attachment = HeaderMap::new();
         attachment.insert(
             CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment; filename=\"f.woff2\""),
         );
-        assert!(should_capture(200, &attachment, &Method::GET, Some("document"), font_path));
+        assert!(should_capture(200, &attachment, &Method::GET, Some("document"), Some("text/html"), false, font_path));
     }
 
     #[test]
@@ -644,22 +675,40 @@ mod tests {
             CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
         );
-        assert!(!should_capture(200, &binary, &Method::GET, None, "/fonts/TwemojiMozilla-flags.woff2"));
-        assert!(!should_capture(200, &binary, &Method::GET, None, "/static/app.JS?x=1".split('?').next().unwrap()));
-        assert!(!should_capture(200, &binary, &Method::GET, None, "/img/logo.PNG"));
+        let nav = Some("text/html,application/xhtml+xml");
+        assert!(!should_capture(200, &binary, &Method::GET, None, nav, false, "/fonts/TwemojiMozilla-flags.woff2"));
+        assert!(!should_capture(200, &binary, &Method::GET, None, nav, false, "/static/app.JS?x=1".split('?').next().unwrap()));
+        assert!(!should_capture(200, &binary, &Method::GET, None, nav, false, "/img/logo.PNG"));
         // 真实下载文件不受影响
-        assert!(should_capture(200, &binary, &Method::GET, None, "/files/firmware.bin"));
-        assert!(should_capture(200, &binary, &Method::GET, None, "/backup.tar.gz"));
+        assert!(should_capture(200, &binary, &Method::GET, None, nav, false, "/files/firmware.bin"));
+        assert!(should_capture(200, &binary, &Method::GET, None, nav, false, "/backup.tar.gz"));
         // 扩展名兜底不影响显式附件
         let mut attachment = HeaderMap::new();
         attachment.insert(
             CONTENT_DISPOSITION,
             HeaderValue::from_static("attachment; filename=\"icon.svg\""),
         );
-        assert!(should_capture(200, &attachment, &Method::GET, None, "/icon.svg"));
+        assert!(should_capture(200, &attachment, &Method::GET, None, nav, false, "/icon.svg"));
         // POST 表单下载同样跳过静态资源路径
-        assert!(!should_capture(200, &binary, &Method::POST, None, "/fonts/a.woff2"));
-        assert!(should_capture(200, &binary, &Method::POST, None, "/cgi-backup"));
+        assert!(!should_capture(200, &binary, &Method::POST, None, nav, false, "/fonts/a.woff2"));
+        assert!(should_capture(200, &binary, &Method::POST, None, nav, false, "/cgi-backup"));
+    }
+
+    #[test]
+    fn skips_http_xhr_and_luci_cgi_exec_without_fetch_metadata() {
+        // OpenWrt LuCI 软件包管理与日志：页面通过 XHR/fetch 请求 /cgi-bin/cgi-exec 执行后台命令，
+        // 普通 HTTP 站点浏览器不会发送 Sec-Fetch-* 头；uhttpd cgi-io 默认返回 application/octet-stream，
+        // 代理绝对不能误捕获为下载导致页面收到 204 No Content 报错。
+        let mut binary = HeaderMap::new();
+        binary.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        // 1. LuCI cgi-exec: POST 请求，Accept 为 */*，带或不带 XHR 标记
+        assert!(!should_capture(200, &binary, &Method::POST, None, Some("*/*"), true, "/cgi-bin/cgi-exec"));
+        assert!(!should_capture(200, &binary, &Method::POST, None, Some("*/*"), false, "/cgi-bin/cgi-exec"));
+        assert!(!should_capture(200, &binary, &Method::GET, None, Some("*/*"), false, "/api/status"));
+        assert!(!should_capture(200, &binary, &Method::POST, None, Some("application/json"), false, "/api/packages"));
     }
 
     #[tokio::test]
