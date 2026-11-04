@@ -53,12 +53,12 @@ async function load() {
       box.appendChild(label);
     });
     $('#ok').disabled = false;
-    if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('duplicate', 410));
+    if (window.fitPopupToContent) window.fitPopupToContent('duplicate', 410);
     // 窗口隐藏创建，选项渲染并收高后再显示
     if (window.showPopupOnce) window.showPopupOnce('duplicate');
   } catch (e) {
     setMsg('加载重复下载信息失败：' + (e.message || e));
-    if (window.fitPopupToContent) requestAnimationFrame(() => window.fitPopupToContent('duplicate', 410));
+    if (window.fitPopupToContent) window.fitPopupToContent('duplicate', 410);
     if (window.showPopupOnce) window.showPopupOnce('duplicate');
   }
 }

@@ -82,13 +82,15 @@
     return targetHeight;
   };
 
-  // 显示由 Rust 侧 on_page_load 负责（隐藏窗口的 rAF 不会触发，页面定时器不可靠）。
-  // 此处仅作幂等确认，页面异常时多一次 show 请求也无害。
-  window.showPopupOnce = function showPopupOnce(target) {
+  // 配合 Rust 侧 visible(false) 隐藏创建弹窗：页面完成紧凑收高后再显示，
+  // 消除 Windows 下 WebView2 首帧在 (0,0) 合成导致的左上角残影与高度跳变。每页仅执行一次。
+  window.showPopupOnce = function showPopupOnce(target, delay) {
     if (showPopupOnce.done) return;
     showPopupOnce.done = true;
-    if (window.api && typeof window.api.showWindow === 'function') {
-      window.api.showWindow(target);
-    }
+    setTimeout(() => {
+      if (window.api && typeof window.api.showWindow === 'function') {
+        window.api.showWindow(target);
+      }
+    }, delay == null ? 30 : delay);
   };
 })();

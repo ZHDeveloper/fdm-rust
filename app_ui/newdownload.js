@@ -302,15 +302,25 @@ function measureContentHeight() {
   return Math.ceil(contentHeight + foot.offsetHeight);
 }
 
+let newdownloadShown = false;
+function showNewdownloadWindow() {
+  if (newdownloadShown) return;
+  newdownloadShown = true;
+  setTimeout(() => {
+    if (window.api && typeof window.api.showWindow === 'function') {
+      window.api.showWindow('newdownload');
+    }
+  }, 30);
+}
+
 function applyAdaptiveHeight() {
   if (!(window.api && window.api.resizeWindow)) return;
   const targetHeight = Math.max(150, Math.min(850, measureContentHeight()));
   currentWinHeight = targetHeight;
   window.api.resizeWindow('newdownload', 520, targetHeight).then((res) => {
     if (res && res.height) currentWinHeight = res.height;
-  }).catch(() => {});
+  }).catch(() => {}).finally(showNewdownloadWindow);
   // 窗口尺寸变化后滚动条/换行可能微调，再校正一次。
-  // 显示由 Rust 侧 on_page_load 负责，此处不再挂任何显示定时器。
   requestAnimationFrame(() => {
     if (!(window.api && window.api.resizeWindow)) return;
     const refined = Math.max(150, Math.min(850, measureContentHeight()));
@@ -330,6 +340,7 @@ $('#toggleAdvanced').onclick = () => {
 // 首次打开（含无 prefill 场景）同步校正窗口高度。
 // 隐藏窗口的 requestAnimationFrame 不会触发，不能用它承载首次自适应。
 applyAdaptiveHeight();
+setTimeout(showNewdownloadWindow, 120);
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id !== 'urlBox') $('#start').click();
