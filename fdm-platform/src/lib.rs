@@ -15,7 +15,7 @@ pub trait PlatformService: Send + Sync {
     /// 打开 Chrome / Edge 的扩展管理页（无法启动时返回 false）
     fn open_browser_extensions(&self, browser: &str) -> bool;
     fn sync_auto_launch(&self, enabled: bool) -> bool;
-    /// 注册/取消 magnet、ed2k 与 .torrent 的文件关联（Windows 当前用户）
+    /// 注册/取消 magnet、ed2k、fdm 启动协议与 .torrent 的文件关联（Windows 当前用户）
     fn sync_file_associations(&self, enabled: bool) -> bool;
     fn extension_dir(&self) -> PathBuf;
 }
@@ -334,6 +334,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
         for (prog, label, proto) in [
             ("FDM.magnet", "FDM 磁力链接", "magnet"),
             ("FDM.ed2k", "FDM ED2K 链接", "ed2k"),
+            ("FDM.launch", "FDM 启动协议", "fdm"),
         ] {
             let prog_path = join_key(base, &format!(r"Software\Classes\{prog}"));
             match hkcu.create_subkey(&prog_path) {
@@ -434,6 +435,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
                 {
                     ok &= url_assoc.set_value("magnet", &"FDM.magnet").is_ok();
                     ok &= url_assoc.set_value("ed2k", &"FDM.ed2k").is_ok();
+                    ok &= url_assoc.set_value("fdm", &"FDM.launch").is_ok();
                 }
             }
             Err(_) => ok = false,
@@ -449,7 +451,11 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
         let mut ok = true;
 
         // 只有当前值仍指向 FDM 时才清除，避免误删其他程序的设置
-        for (proto, prog) in [("magnet", "FDM.magnet"), ("ed2k", "FDM.ed2k")] {
+        for (proto, prog) in [
+            ("magnet", "FDM.magnet"),
+            ("ed2k", "FDM.ed2k"),
+            ("fdm", "FDM.launch"),
+        ] {
             let path = join_key(base, &format!(r"Software\Classes\{proto}"));
             if let Ok(key) = hkcu.open_subkey_with_flags(&path, KEY_ALL_ACCESS) {
                 let current: Option<String> = key.get_value("").ok();
@@ -483,6 +489,7 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
         for path in [
             join_key(base, r"Software\Classes\FDM.magnet"),
             join_key(base, r"Software\Classes\FDM.ed2k"),
+            join_key(base, r"Software\Classes\FDM.launch"),
             join_key(base, r"Software\Classes\FDM.torrent"),
             join_key(base, &format!(r"Software\Classes\Applications\{app_file}")),
             join_key(base, r"Software\FDM\Capabilities"),
@@ -561,7 +568,7 @@ fn sync_file_associations_impl(enabled: bool) -> bool {
             return false;
         };
         let mut ok = true;
-        for scheme in ["magnet", "ed2k"] {
+        for scheme in ["magnet", "ed2k", "fdm"] {
             match make_cfstring(scheme) {
                 Some(value) => {
                     ok &= LSSetDefaultHandlerForURLScheme(value, handler) == 0;
@@ -1005,10 +1012,21 @@ mod registry_tests {
             .get_value("FDM")
             .unwrap();
         assert_eq!(registered, r"Software\FDM\Capabilities");
+        let launch_cmd: String = hkcu
+            .open_subkey(format!(
+                r"{base}\Software\Classes\FDM.launch\shell\open\command"
+            ))
+            .unwrap()
+            .get_value("")
+            .unwrap();
+        assert!(launch_cmd.contains("\"%1\""));
 
         assert!(sync_file_associations_at(&hkcu, &base, &exe, false));
         assert!(hkcu
             .open_subkey(format!(r"{base}\Software\Classes\FDM.magnet"))
+            .is_err());
+        assert!(hkcu
+            .open_subkey(format!(r"{base}\Software\Classes\FDM.launch"))
             .is_err());
         let torrent_key = hkcu
             .open_subkey(format!(r"{base}\Software\Classes\.torrent"))

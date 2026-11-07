@@ -12,6 +12,9 @@ const FDM_PORT = 25432;
 const PROXY_PORT = 25433;
 const STATUS_ALARM = 'fdm-status-check';
 const PROXY_STORAGE_KEY = 'fdmProxyState';
+const INTERCEPT_STORAGE_KEY = 'fdmInterceptEnabled';
+const FDM_LAUNCH_URL = 'fdm://launch';
+const FDM_LAUNCH_TIMEOUT_MS = 15000;
 
 function originalProxyString(original) {
   const v = original && typeof original === 'object' ? original : null;
@@ -118,6 +121,7 @@ async function applyProxy(enabled, systemProxy) {
 let isOnline = false;
 let serverInfo = null;
 let lastBlobCaptureState = null;
+let interceptionEnabled = true;
 
 // ==================== Service Worker 冷启动就绪闸门 ====================
 // MV3 Service Worker 空闲约 30 秒即被 Chrome 挂起，唤醒时全局变量重置
@@ -159,7 +163,7 @@ function getServerBaseUrl() {
 
 function currentBlobCaptureState() {
   return {
-    enabled: !!(isOnline && serverInfo && serverInfo.blob_capture === true)
+    enabled: !!(interceptionEnabled && isOnline && serverInfo && serverInfo.blob_capture === true)
   };
 }
 
@@ -193,8 +197,8 @@ async function checkServerStatus() {
       const data = await resp.json();
       isOnline = true;
       serverInfo = data;
-      applyProxy(!!(data && data.proxy_ready), data && data.system_proxy);
-      updateBadgeOnline(data);
+      applyProxy(interceptionEnabled && !!(data && data.proxy_ready), data && data.system_proxy);
+      updateActionState(data);
       broadcastBlobCaptureState();
       return { online: true, data };
     }
@@ -205,21 +209,31 @@ async function checkServerStatus() {
   isOnline = false;
   serverInfo = null;
   applyProxy(false, null);
-  updateBadgeOffline();
+  updateActionState(null);
   broadcastBlobCaptureState();
   return { online: false, data: null };
 }
 
-function updateBadgeOnline(info) {
+function updateActionState(info) {
   try {
     chrome.action.setIcon({
-      path: {
+      path: interceptionEnabled ? {
         16: 'icons/icon16.png',
         32: 'icons/icon32.png',
         48: 'icons/icon48.png',
         128: 'icons/icon128.png'
+      } : {
+        16: 'icons/icon16_gray.png',
+        32: 'icons/icon32_gray.png',
+        48: 'icons/icon48_gray.png',
+        128: 'icons/icon128_gray.png'
       }
     });
+    if (!interceptionEnabled) {
+      chrome.action.setBadgeText({ text: '' });
+      chrome.action.setTitle({ title: 'FDM 下载接管已关闭（点击开启）' });
+      return;
+    }
 
     const activeCount = info && typeof info.active_tasks === 'number' ? info.active_tasks : 0;
     if (activeCount > 0) {
@@ -229,25 +243,10 @@ function updateBadgeOnline(info) {
       chrome.action.setBadgeText({ text: '' });
     }
     chrome.action.setTitle({
-      title: `FDM 在线 · 活跃任务: ${activeCount} · 总速度: ${(info && info.total_speed_str) || '0 B/s'}`
+      title: isOnline
+        ? `FDM 在线 · 活跃任务: ${activeCount} · 总速度: ${(info && info.total_speed_str) || '0 B/s'}`
+        : 'FDM 未连接（点击关闭下载接管）'
     });
-  } catch {
-    // 忽略异常
-  }
-}
-
-function updateBadgeOffline() {
-  try {
-    chrome.action.setIcon({
-      path: {
-        16: 'icons/icon16_gray.png',
-        32: 'icons/icon32_gray.png',
-        48: 'icons/icon48_gray.png',
-        128: 'icons/icon128_gray.png'
-      }
-    });
-    chrome.action.setBadgeText({ text: '' });
-    chrome.action.setTitle({ title: 'FDM 未连接（下载将由浏览器原生处理）' });
   } catch {
     // 忽略异常
   }
@@ -289,6 +288,54 @@ async function sendTaskToFDM(payload) {
   return null;
 }
 
+function launchFdm() {
+  // Service Worker 没有 DOM；自定义协议必须通过浏览器标签页交给系统。
+  chrome.tabs.create({ url: FDM_LAUNCH_URL, active: false }, (tab) => {
+    void chrome.runtime.lastError;
+    if (!tab || !Number.isInteger(tab.id)) return;
+    setTimeout(() => {
+      chrome.tabs.remove(tab.id, () => void chrome.runtime.lastError);
+    }, 1500);
+  });
+}
+
+async function sendTaskToFdmAfterLaunch(payload) {
+  launchFdm();
+  const deadline = Date.now() + FDM_LAUNCH_TIMEOUT_MS;
+  do {
+    const status = await checkServerStatus();
+    if (status.online) return sendTaskToFDM(payload);
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  return null;
+}
+
+async function loadInterceptionEnabled() {
+  const stored = await chrome.storage.local.get(INTERCEPT_STORAGE_KEY);
+  interceptionEnabled = stored[INTERCEPT_STORAGE_KEY] !== false;
+}
+
+async function ensureReadyWithToggle() {
+  if (readyPromise) await readyPromise;
+  try { await loadInterceptionEnabled(); } catch {}
+  return ensureReady(true);
+}
+
+async function toggleInterception() {
+  await loadInterceptionEnabled();
+  interceptionEnabled = !interceptionEnabled;
+  await chrome.storage.local.set({ [INTERCEPT_STORAGE_KEY]: interceptionEnabled });
+  await ensureReadyWithToggle();
+
+  if (!interceptionEnabled) {
+    await applyProxy(false, null);
+  } else {
+    await checkServerStatus();
+  }
+  updateActionState(serverInfo);
+  broadcastBlobCaptureState();
+}
+
 // 后端成功创建任务，或成功拉起「新建任务」窗口，都视为接管成功。
 function isHandledByFDM(result) {
   // 只要请求成功返回 ok:true，就说明 FDM 已经接管（创建、复用、跳过或拉起窗口）。
@@ -300,7 +347,7 @@ const BLOB_CHUNK_SIZE = 4 * 1024 * 1024;
 const BLOB_ACK_TIMEOUT_MS = 30000;
 
 async function prepareBlobCapture(message) {
-  await ensureReady();
+  await ensureReadyWithToggle();
   if (!currentBlobCaptureState().enabled) return { ok: false };
   const size = Number(message && message.size);
   if (!Number.isSafeInteger(size) || size < 0) return { ok: false };
@@ -436,7 +483,7 @@ function uploadBlobToFdm(wsUrl, blob) {
 }
 
 async function startBlobUpload(message) {
-  await ensureReady();
+  await ensureReadyWithToggle();
   if (!currentBlobCaptureState().enabled) return { ok: false, started: false };
   const blobUrl = String((message && message.blobUrl) || '');
   if (!blobUrl.startsWith('blob:')) return { ok: false, started: false };
@@ -607,7 +654,12 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   const settle = async () => {
     try {
       // 冷启动就绪：先完成本地服务状态探测，再做接管判定
-      await ensureReady();
+      await ensureReadyWithToggle();
+
+      if (!interceptionEnabled) {
+        doSuggest(suggest, item);
+        return;
+      }
 
       if (!isOnline || !isInterceptableUrl(url)) {
         // FDM 未启动：兜底放行，绝不影响浏览器正常下载
@@ -665,7 +717,9 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
           confirm: true
         };
 
-        const result = await sendTaskToFDM(payload);
+        const result = isOnline
+          ? await sendTaskToFDM(payload)
+          : await sendTaskToFdmAfterLaunch(payload);
         if (isHandledByFDM(result)) {
           // 接管成功：先让 Chrome 完成下载决策，再取消并清理原生下载项。
           abortBrowserDownload(suggest, item);
@@ -770,7 +824,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   if (!targetUrl) return;
 
-  await ensureReady();
+  if (!interceptionEnabled) {
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128_gray.png',
+      title: 'FDM 下载接管已关闭',
+      message: '点击浏览器工具栏的 FDM 图标可重新开启。',
+      priority: 1
+    });
+    return;
+  }
 
   if (!isOnline) {
     chrome.notifications.create({
@@ -914,11 +977,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.action.onClicked.addListener(() => {
-  void ensureReady(true);
+  void toggleInterception();
 });
 
 (async () => {
   // 冷启动就绪：任何一项初始化失败都不能影响状态探测与 PAC 生命周期
+  try { await loadInterceptionEnabled(); } catch {}
   try {
     await ensureReady(true);
   } catch (e) {

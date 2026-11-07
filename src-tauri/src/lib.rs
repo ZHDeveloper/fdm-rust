@@ -941,6 +941,9 @@ fn prefill_from_arg(raw: &str, cwd: Option<&str>) -> Option<Value> {
         return None;
     }
     let lower = arg.to_ascii_lowercase();
+    if lower.starts_with("fdm://launch") {
+        return None;
+    }
     if lower.starts_with("ed2k://") {
         // macOS 可能把 ed2k 链接中的竖线转义为 %7C，还原后再交给解析器。
         let decoded =
@@ -1392,6 +1395,7 @@ mod arg_tests {
         );
 
         assert!(prefill_from_arg("--background", None).is_none());
+        assert!(prefill_from_arg("fdm://launch", None).is_none());
     }
 
     #[cfg(windows)]
