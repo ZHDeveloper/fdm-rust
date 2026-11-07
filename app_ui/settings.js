@@ -88,6 +88,9 @@ function renderUpdateStatus(status) {
     updateInfo = null;
   }
   installBtn.disabled = !(phase === 'available' && st.version);
+  if (window.fitPopupToContent && document.querySelector('.pane.active[data-pane="about"]')) {
+    window.fitPopupToContent('settings', 520, { maxHeight: SETTINGS_MAX_HEIGHT });
+  }
 }
 
 async function refreshAbout() {
