@@ -288,26 +288,71 @@ async function sendTaskToFDM(payload) {
   return null;
 }
 
-function launchFdm() {
-  // Service Worker 没有 DOM；自定义协议必须通过浏览器标签页交给系统。
-  chrome.tabs.create({ url: FDM_LAUNCH_URL, active: false }, (tab) => {
-    void chrome.runtime.lastError;
-    if (!tab || !Number.isInteger(tab.id)) return;
-    setTimeout(() => {
-      chrome.tabs.remove(tab.id, () => void chrome.runtime.lastError);
-    }, 1500);
+let launchPromise = null;
+
+async function tryLaunchInActiveTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !Number.isInteger(tab.id) || !/^https?:/.test(tab.url || '')) return false;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (launchUrl) => {
+        if (!navigator.userActivation || !navigator.userActivation.isActive) return false;
+        const a = document.createElement('a');
+        a.href = launchUrl;
+        a.style.display = 'none';
+        a.addEventListener('click', (e) => e.stopPropagation(), true);
+        (document.body || document.documentElement).appendChild(a);
+        a.click();
+        a.remove();
+        return true;
+      },
+      args: [FDM_LAUNCH_URL]
+    });
+    return !!(results && results[0] && results[0].result);
+  } catch {
+    return false;
+  }
+}
+
+function createLaunchTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.create({ url: FDM_LAUNCH_URL, active: true }, (tab) => {
+      void chrome.runtime.lastError;
+      resolve(tab && Number.isInteger(tab.id) ? tab.id : null);
+    });
   });
 }
 
+function closeLaunchTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  chrome.tabs.remove(tabId, () => void chrome.runtime.lastError);
+}
+
+function waitForFdmOnline() {
+  if (launchPromise) return launchPromise;
+  launchPromise = (async () => {
+    const inPage = await tryLaunchInActiveTab();
+    const tabId = inPage ? null : await createLaunchTab();
+    const deadline = Date.now() + FDM_LAUNCH_TIMEOUT_MS;
+    try {
+      do {
+        const status = await checkServerStatus();
+        if (status.online) return true;
+        await new Promise(resolve => setTimeout(resolve, 400));
+      } while (Date.now() < deadline);
+      return false;
+    } finally {
+      closeLaunchTab(tabId);
+      launchPromise = null;
+    }
+  })();
+  return launchPromise;
+}
+
 async function sendTaskToFdmAfterLaunch(payload) {
-  launchFdm();
-  const deadline = Date.now() + FDM_LAUNCH_TIMEOUT_MS;
-  do {
-    const status = await checkServerStatus();
-    if (status.online) return sendTaskToFDM(payload);
-    await new Promise(resolve => setTimeout(resolve, 500));
-  } while (Date.now() < deadline);
-  return null;
+  if (!(await waitForFdmOnline())) return null;
+  return sendTaskToFDM(payload);
 }
 
 async function loadInterceptionEnabled() {
@@ -656,13 +701,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       // 冷启动就绪：先完成本地服务状态探测，再做接管判定
       await ensureReadyWithToggle();
 
-      if (!interceptionEnabled) {
-        doSuggest(suggest, item);
-        return;
-      }
-
-      if (!isOnline || !isInterceptableUrl(url)) {
-        // FDM 未启动：兜底放行，绝不影响浏览器正常下载
+      if (!interceptionEnabled || !isInterceptableUrl(url)) {
         doSuggest(suggest, item);
         return;
       }
@@ -824,23 +863,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   if (!targetUrl) return;
 
+  await ensureReadyWithToggle();
+
   if (!interceptionEnabled) {
     chrome.notifications.create({
       type: 'basic',
       iconUrl: 'icons/icon128_gray.png',
       title: 'FDM 下载接管已关闭',
       message: '点击浏览器工具栏的 FDM 图标可重新开启。',
-      priority: 1
-    });
-    return;
-  }
-
-  if (!isOnline) {
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: 'icons/icon128_gray.png',
-      title: 'FDM 未连接',
-      message: '请先启动 FDM 桌面客户端，再使用右键下载。',
       priority: 1
     });
     return;
@@ -863,7 +893,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     forceDialog: true
   };
 
-  const res = await sendTaskToFDM(payload);
+  const res = isOnline
+    ? await sendTaskToFDM(payload)
+    : await sendTaskToFdmAfterLaunch(payload);
   if (!isHandledByFDM(res)) {
     chrome.notifications.create({
       type: 'basic',

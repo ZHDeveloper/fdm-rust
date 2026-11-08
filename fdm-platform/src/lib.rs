@@ -301,6 +301,18 @@ fn join_key(base: &str, sub: &str) -> String {
 }
 
 #[cfg(windows)]
+fn clean_exe_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(windows)]
 fn sync_file_associations_impl(enabled: bool) -> bool {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
@@ -308,7 +320,7 @@ fn sync_file_associations_impl(enabled: bool) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
-    let exe = exe.canonicalize().unwrap_or(exe);
+    let exe = clean_exe_path(&exe.canonicalize().unwrap_or(exe));
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     sync_file_associations_at(&hkcu, "", &exe, enabled)
 }
@@ -319,6 +331,7 @@ fn sync_file_associations_impl(enabled: bool) -> bool {
 fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enabled: bool) -> bool {
     use winreg::enums::KEY_ALL_ACCESS;
 
+    let exe = clean_exe_path(exe);
     let exe_text = exe.to_string_lossy().into_owned();
     let command = format!("\"{exe_text}\" \"%1\"");
     let icon = format!("{exe_text},0");
@@ -360,6 +373,12 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
                     ok &= key.set_value("URL Protocol", &"").is_ok();
                 }
                 Err(_) => ok = false,
+            }
+            if let Ok((key, _)) = hkcu.create_subkey(join_key(&proto_path, "DefaultIcon")) {
+                ok &= key.set_value("", &icon).is_ok();
+            }
+            if let Ok((key, _)) = hkcu.create_subkey(join_key(&proto_path, r"shell\open\command")) {
+                ok &= key.set_value("", &command).is_ok();
             }
         }
 
@@ -462,6 +481,8 @@ fn sync_file_associations_at(hkcu: &winreg::RegKey, base: &str, exe: &Path, enab
                 if current.as_deref() == Some(prog) {
                     let _ = key.delete_value("");
                     let _ = key.delete_value("URL Protocol");
+                    let _ = key.delete_subkey_all("DefaultIcon");
+                    let _ = key.delete_subkey_all("shell");
                 }
             }
         }
@@ -988,7 +1009,7 @@ mod registry_tests {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let base = format!(r"Software\FDM\__assoc_test_{}", std::process::id());
         let _ = hkcu.delete_subkey_all(&base);
-        let exe = PathBuf::from(r"C:\Program Files\FDM\fdm-desktop.exe");
+        let exe = PathBuf::from(r"\\?\C:\Program Files\FDM\fdm-desktop.exe");
 
         assert!(sync_file_associations_at(&hkcu, &base, &exe, true));
         let magnet_cmd: String = hkcu
@@ -999,6 +1020,7 @@ mod registry_tests {
             .get_value("")
             .unwrap();
         assert!(magnet_cmd.contains("fdm-desktop.exe"));
+        assert!(!magnet_cmd.contains(r"\\?\"));
         assert!(magnet_cmd.contains("\"%1\""));
         let torrent_default: String = hkcu
             .open_subkey(format!(r"{base}\Software\Classes\.torrent"))
@@ -1019,6 +1041,7 @@ mod registry_tests {
             .unwrap()
             .get_value("")
             .unwrap();
+        assert!(!launch_cmd.contains(r"\\?\"));
         assert!(launch_cmd.contains("\"%1\""));
 
         assert!(sync_file_associations_at(&hkcu, &base, &exe, false));
